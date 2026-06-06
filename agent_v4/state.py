@@ -78,6 +78,9 @@ class AgentState(BaseModel):
 
     # responder / validator
     draft_response: str | None = None
+    # Typed "rich reply" blocks accompanying draft_response (the prose message).
+    # See agent_v4.output_schemas; empty for plain conversational turns.
+    draft_blocks: list[dict] = Field(default_factory=list)
     validation_errors: list[ValidationError] = Field(default_factory=list)
     response_attempts: int = 0
 

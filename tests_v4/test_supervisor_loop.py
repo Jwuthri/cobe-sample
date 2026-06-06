@@ -87,15 +87,34 @@ def test_smalltalk_keyword_detection_is_conservative():
     )
 
 
-def test_supervisor_short_circuits_when_last_step_has_asks_and_no_hint():
+def test_single_intent_asks_routes_to_writer_when_classifier_says_done():
+    # A leaf asked the user a follow-up and there's no OTHER unhandled
+    # intent -> the classifier (now consulted, no asks short-circuit)
+    # returns done -> writer.
     sr = StepResult(
         sop=ids.CHECKOUT, summary="captured identity", asks=["street", "city", "zip"], next_sop=None
     )
     s = _state(step_results=[sr], iteration=1)
     with patch("agent_v4.supervisor.classify_with_history") as classifier:
-        classifier.side_effect = AssertionError("classifier should not run when last has asks")
+        classifier.return_value = SupervisorDecision(done=True, reason="only intent handled")
         cmd = supervisor(s)
     assert cmd.goto == "writer"
+
+
+def test_compound_ask_runs_second_leaf_after_first_returns_asks():
+    # Regression: "what hoodies do you have, and where's my order ORD-7?"
+    # product_rec handled the product part and asked the user to pick one;
+    # the order-status part is still unhandled, so the supervisor must route
+    # to order_status rather than bail to the writer (the old asks shortcut).
+    sr = StepResult(sop=ids.PRODUCT_REC, summary="showed 1 product", asks=["pick a product id"])
+    s = _state(step_results=[sr], iteration=1)
+    with patch("agent_v4.supervisor.classify_with_history") as classifier:
+        classifier.return_value = SupervisorDecision(
+            done=False, next_sop=ids.ORDER_STATUS, reason="order part still unhandled"
+        )
+        cmd = supervisor(s)
+    assert cmd.goto == "order_status_wrapper"
+    assert cmd.update["active_sop"] == ids.ORDER_STATUS
 
 
 def test_supervisor_doesnt_re_enter_same_leaf_if_classifier_repicks():

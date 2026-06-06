@@ -166,8 +166,8 @@ def _process_update_event(node: str, update: dict, log: EventLog, state: AgentSt
         log.add("AGENT", f"{node} finished")
         for sr in update.get("step_results", []) or []:
             asks = f" asks={sr.asks}" if sr.asks else ""
-            nxt = f" → {sr.next_sop.value}" if sr.next_sop else ""
-            log.add("STEP", f"{sr.sop.value}: {sr.summary}{asks}{nxt}")
+            nxt = f" → {sr.next_sop}" if sr.next_sop else ""
+            log.add("STEP", f"{sr.sop}: {sr.summary}{asks}{nxt}")
     elif node == "writer":
         draft = update.get("draft_response", "")
         if draft:
@@ -252,6 +252,7 @@ def run_cli() -> None:
             update={
                 "messages": state.messages + [HumanMessage(content=user_input)],
                 "draft_response": None,
+                "draft_blocks": [],
                 "validation_errors": [],
                 "response_attempts": 0,
                 "done": False,

@@ -33,7 +33,13 @@ from agent_v4.skills import CHECKOUT_SKILLS
 from agent_v4.state import AgentState
 from agent_v4.step_result import StepResult
 from agent_v4.tools.catalog_tools import get_product, search_products
-from agent_v4.tools.checkout_tools import CHECKOUT_TOOLS, add_item
+from agent_v4.tools.checkout_tools import (
+    CHECKOUT_TOOLS,
+    add_item,
+    get_cart_summary,
+    remove_item,
+    set_quantity,
+)
 from agent_v4.tools.order_tools import get_order_status, list_recent_orders
 from agent_v4.tools.serviceability_tools import check_serviceability
 from langchain_core.messages import HumanMessage, ToolMessage
@@ -60,9 +66,10 @@ already loaded.
 You can call ``get_cart_summary()`` any time to see the current cart
 state and any blockers.
 
-Items may already be in the cart from a previous step (e.g., handed
-off from product recommendations). Don't try to add them again —
-inspect the cart and proceed to the next missing piece.
+Items are already in the cart from a previous step (e.g., handed off
+from product recommendations). You do NOT have an add-item tool — never
+try to add products. Use get_cart_summary() to inspect the cart if you
+need to, then proceed to the next missing piece of the checkout flow.
 
 ## Confirmation rule (read carefully)
 
@@ -83,7 +90,9 @@ you've made progress; the writer will summarize.
 """
 
 PRODUCT_REC_PROMPT = """\
-You handle pre-purchase questions and pre-checkout cart additions.
+You handle browsing AND cart management: search, look up products,
+answer serviceability, and edit the cart (add, remove, change quantity,
+and show what's in it).
 
 Your tools:
   - search_products(query, limit=5) — find products by free-text query.
@@ -92,6 +101,9 @@ Your tools:
   - check_serviceability(zip_code)  — does the store ship to a given
                                        zip, and with what options?
   - add_item(product_id, quantity=1) — add a product to the user's cart.
+  - remove_item(product_id)          — remove a product line from the cart.
+  - set_quantity(product_id, qty)    — set a line's quantity (0 removes it).
+  - get_cart_summary()               — show the current cart + totals.
 
 ## Which tool to use
 
@@ -117,9 +129,27 @@ Your tools:
     "P3", "p-3", "P-3" all mean P-3) — pass the canonical "P-N" form
     to add_item.
 
+  * **"remove the hoodie", "remove P-2", "take the cap out", "delete the
+    second one", "I don't want the shoes anymore"** → remove_item with
+    the right product_id. Call get_cart_summary() first if you need to
+    see the cart / resolve which line they mean.
+
+  * **"make it 2", "change the hoodie to 3", "I want two of those"** →
+    set_quantity(product_id, qty). set_quantity(product_id, 0) removes it.
+
+  * **"what's in my cart", "show my cart", "why are there 2 hoodies"** →
+    get_cart_summary() and report the contents. Do NOT add or remove
+    anything for a pure "what's in my cart" question.
+
 ## Rules
 
   - Never invent products. Only mention what the tools return.
+  - Order ids (formats like ORD-123 or RCPT-9000) are NOT products.
+    NEVER pass them to get_product or search_products — a separate agent
+    handles order status. If the message mixes a product question with an
+    order-status question (e.g. "what hoodies do you have, and where's my
+    order ORD-7?"), handle ONLY the product part here and ignore the
+    order id.
   - If a search returns no matches, say so and ask the user to clarify.
   - If the user already saw a product list in recent turns and now says
     "yes" / "add it" / "buy it", DON'T re-search — go straight to
@@ -150,7 +180,11 @@ CHECKOUT_CONFIG = AgentConfig(
     name="checkout",
     description="Guide the user through placing an order (identity → payment).",
     system_prompt=CHECKOUT_SYSTEM_PROMPT,
-    tools=_registry_tools(CHECKOUT_TOOLS),
+    # add_item is product_rec's job. Excluding it from the checkout leaf makes
+    # it structurally impossible for the checkout subagent to RE-add an item
+    # product_rec just added and handed off (which doubled cart quantities).
+    # checkout keeps remove_item / set_quantity for mid-checkout adjustments.
+    tools=_registry_tools([t for t in CHECKOUT_TOOLS if t.name != "add_item"]),
     skills=[SkillSpec(name=s["name"]) for s in CHECKOUT_SKILLS],
     middleware=[MiddlewareSpec(name="log_tool_calls")],
 )
@@ -361,11 +395,13 @@ def make_product_rec_wrapper(agent: Any) -> Callable[[AgentState], Command]:
     def product_rec_wrapper(state: AgentState) -> Command:
         """Run the product_rec subagent for one iteration.
 
-        Observes whether the subagent CALLED add_item (cart item count grew)
-        and signals next_sop=checkout if so.
+        product_rec owns cart CONTENTS (add / remove / set quantity) plus
+        browsing + serviceability. We diff the cart (product_id -> quantity)
+        before/after to classify what happened: an add hands off to checkout;
+        a remove or quantity decrease just reports the updated cart.
         """
         ctx = _runtime_context(state)
-        items_before = len(state.cart.items)
+        before = {i.product_id: i.quantity for i in state.cart.items}
 
         # Pass recent conversation history so the subagent can resolve
         # pronouns like "them" / "those" to products it just presented.
@@ -377,20 +413,39 @@ def make_product_rec_wrapper(agent: Any) -> Callable[[AgentState], Command]:
 
         products = _extract_products_from_messages(result["messages"])
         serviceability = _extract_serviceability_from_messages(result["messages"])
+        viewed_cart = any(
+            isinstance(m, ToolMessage) and getattr(m, "name", None) == "get_cart_summary"
+            for m in result["messages"]
+        )
 
         cart_now = ctx.cart_service.cart
-        added_ids = [i.product_id for i in cart_now.items[items_before:]]
+        after = {i.product_id: i.quantity for i in cart_now.items}
+        added = [pid for pid in after if after[pid] > before.get(pid, 0)]
+        removed = [pid for pid in before if pid not in after]
+        decreased = [pid for pid in after if pid in before and after[pid] < before[pid]]
+        cart_changed = bool(added or removed or decreased)
+
+        def _cart_lines() -> list[dict]:
+            return [
+                {"id": i.product_id, "name": i.name, "qty": i.quantity, "price": str(i.unit_price)}
+                for i in cart_now.items
+            ]
 
         next_sop: str | None = None
         asks: list[str] = []
         details: dict | None = None
 
-        if added_ids:
-            summary = f"added {', '.join(added_ids)} to cart"
+        if added:
+            summary = f"added {', '.join(added)} to cart"
             next_sop = ids.CHECKOUT
-            details = {"added": added_ids}
+            details = {"added": added}
             if products:
                 details["products"] = products
+        elif removed or decreased:
+            changed = removed + decreased
+            verb = "removed" if removed and not decreased else "updated"
+            summary = f"{verb} cart ({', '.join(changed)})"
+            details = {"cart_edit": {"removed": removed, "decreased": decreased, "items": _cart_lines()}}
         elif serviceability:
             summary = "answered a serviceability question"
             details = {"serviceability": serviceability}
@@ -400,6 +455,10 @@ def make_product_rec_wrapper(agent: Any) -> Callable[[AgentState], Command]:
             summary = f"catalog returned {len(products)} matching product(s)"
             asks = ["pick a product id (e.g. P-1) to add to your cart"]
             details = {"products": products}
+        elif viewed_cart and cart_now.items:
+            # "what's in my cart" — get_cart_summary ran, nothing changed.
+            summary = "showed the cart"
+            details = {"cart_edit": {"removed": [], "decreased": [], "items": _cart_lines()}}
         else:
             summary = "no products matched the user's query"
             asks = ["clarify what you're looking for"]
@@ -410,7 +469,7 @@ def make_product_rec_wrapper(agent: Any) -> Callable[[AgentState], Command]:
             asks=asks,
             next_sop=next_sop,
             details=details,
-            cart_diff={"items": len(cart_now.items)} if added_ids else None,
+            cart_diff={"items": len(cart_now.items)} if cart_changed else None,
         )
         return Command(
             goto="supervisor",
@@ -459,6 +518,9 @@ class LeafSpec:
     wrapper_factory: Callable[[Any], Callable[[AgentState], Command]]
     needs_checkpointer: bool = False
     needs_store: bool = True
+    # The writer block kind this leaf produces (see agent_v4.output_schemas).
+    # None = this leaf contributes only to the prose message, no typed block.
+    output_block: str | None = None
     extra: dict[str, Any] = field(default_factory=dict)
 
 
@@ -467,13 +529,15 @@ LEAVES: list[LeafSpec] = [
         name=ids.PRODUCT_REC,
         config=PRODUCT_REC_CONFIG,
         wrapper_factory=make_product_rec_wrapper,
+        output_block="product_reco",
         routing_help=(
-            "product_rec    Pre-purchase questions: search the catalog, look up\n"
-            "               a single product, AND answer delivery-area questions\n"
-            '               ("do you ship to <city/zip>?", "what shipping is\n'
-            '               available in 94110?"). Use this for ANY question\n'
-            "               that doesn't require a cart. Also adds items to the\n"
-            "               cart and hands off to checkout."
+            "product_rec    Browsing AND cart management. Pre-purchase questions\n"
+            "               (search the catalog, look up a product, delivery-area\n"
+            '               questions like "do you ship to 94110?"), AND all cart\n'
+            "               CONTENT edits: add an item, REMOVE an item, change a\n"
+            '               quantity, plus "what is in my cart" / "why are there N".\n'
+            "               Cart edits route here even mid-checkout. Adding an item\n"
+            "               hands off to checkout."
         ),
     ),
     LeafSpec(
@@ -481,6 +545,7 @@ LEAVES: list[LeafSpec] = [
         config=CHECKOUT_CONFIG,
         wrapper_factory=make_checkout_wrapper,
         needs_checkpointer=True,
+        output_block="checkout",
         routing_help=(
             "checkout       The user is actively trying to buy: they want a cart\n"
             "               opened, or they're providing data the in-progress\n"
@@ -493,6 +558,7 @@ LEAVES: list[LeafSpec] = [
         name=ids.ORDER_STATUS,
         config=ORDER_STATUS_CONFIG,
         wrapper_factory=make_order_status_wrapper,
+        output_block="order_status",
         routing_help=(
             "order_status   The user is asking about a PAST order's status,\n"
             "               tracking, or delivery (order ids look like ORD-* or\n"

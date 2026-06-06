@@ -27,21 +27,30 @@ def test_leaf_names_match_ids():
 
 
 def test_checkout_config_has_all_constrained_tools_and_skills():
-    # 13 constrained checkout tools, 5 ordered skills (matches v2 sops/checkout).
-    assert len(CHECKOUT_CONFIG.tools) == 13
+    # 12 constrained checkout tools (the 13 CHECKOUT_TOOLS minus add_item, which
+    # is product_rec's job) + 5 ordered skills.
+    assert len(CHECKOUT_CONFIG.tools) == 12
     assert len(CHECKOUT_CONFIG.skills) == 5
     skill_names = {s.name for s in CHECKOUT_CONFIG.skills}
     assert {"collect_identity", "collect_payment"} <= skill_names
     assert {"confirm_checkout", "set_address", "get_cart_summary"} <= _tool_names(CHECKOUT_CONFIG)
+    # checkout must NOT be able to add products (prevents the handoff double-add);
+    # it keeps remove_item / set_quantity for mid-checkout edits.
+    assert "add_item" not in _tool_names(CHECKOUT_CONFIG)
+    assert {"remove_item", "set_quantity"} <= _tool_names(CHECKOUT_CONFIG)
     assert [m.name for m in CHECKOUT_CONFIG.middleware] == ["log_tool_calls"]
 
 
 def test_product_rec_config_tools():
+    # product_rec owns cart CONTENTS: browse + add + remove + qty + view.
     assert _tool_names(PRODUCT_REC_CONFIG) == {
         "search_products",
         "get_product",
         "check_serviceability",
         "add_item",
+        "remove_item",
+        "set_quantity",
+        "get_cart_summary",
     }
     # product_rec is gateless — no skills.
     assert PRODUCT_REC_CONFIG.skills == []

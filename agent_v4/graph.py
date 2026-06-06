@@ -64,21 +64,43 @@ _LEAF_AGENTS = _compile_leaf_agents()
 
 
 # ============================================================ gate
+# Phrases that ASSERT the order is complete/placed. Kept specific so the gate
+# doesn't false-trigger on the writer merely describing the cart (e.g. "your
+# order has 2 hoodies"), being polite ("thank you"), or prompting confirmation
+# ("reply yes to place the order").
+_CONFIRM_CLAIM_PHRASES = (
+    "order is confirmed",
+    "order confirmed",
+    "order has been placed",
+    "order is placed",
+    "order placed",
+    "placed your order",
+    "successfully placed",
+    "successfully ordered",
+    "your order is on its way",
+    "on its way",
+    "you're all set",
+    "you are all set",
+    "here is your receipt",
+    "here's your receipt",
+    "receipt id",
+)
+
+
 def checkout_gate(state: AgentState) -> Command:
     """Re-assert ``Cart.blockers()`` if the writer's reply claims confirmed."""
     if state.active_sop != ids.CHECKOUT:
         return Command(goto="validator")
     cart = state.cart
     text_lower = (state.draft_response or "").lower()
-    claims_done = any(
-        k in text_lower for k in ("confirmed", "placed", "your order", "all set", "thank you")
-    )
+    claims_done = any(p in text_lower for p in _CONFIRM_CLAIM_PHRASES)
     if claims_done and not cart.ready_to_confirm():
         blockers = "; ".join(b.code for b in cart.blockers())
         return Command(
             goto="supervisor",
             update={
                 "draft_response": None,
+                "draft_blocks": [],
                 "validation_errors": [
                     ValidationError(
                         code="gate",
@@ -122,6 +144,7 @@ def validator(state: AgentState) -> Command:
             goto="emit",
             update={
                 "draft_response": "Sorry, I couldn't produce a clean response. Could you rephrase?",
+                "draft_blocks": [],
                 "validation_errors": errors,
             },
         )
@@ -131,6 +154,7 @@ def validator(state: AgentState) -> Command:
         update={
             "validation_errors": errors,
             "draft_response": None,
+            "draft_blocks": [],
             "response_attempts": state.response_attempts + 1,
         },
     )
@@ -140,12 +164,18 @@ def validator(state: AgentState) -> Command:
 def emit(state: AgentState) -> Command:
     if not state.draft_response:
         return Command(goto=END, update={"done": True})
-    msg = AIMessage(content=state.draft_response)
+    # Carry the typed blocks alongside the message so they persist in
+    # state.messages (and reach the UI via serialize_state / the bot event).
+    msg = AIMessage(
+        content=state.draft_response,
+        additional_kwargs={"blocks": state.draft_blocks} if state.draft_blocks else {},
+    )
     return Command(
         goto=END,
         update={
             "messages": [msg],
             "draft_response": None,
+            "draft_blocks": [],
             "response_attempts": 0,
             "done": True,
             # Don't carry step_results / iteration across turns.
@@ -182,6 +212,7 @@ def run_turn(state: AgentState, user_msg: str) -> AgentState:
         update={
             "messages": state.messages + [HumanMessage(content=user_msg)],
             "draft_response": None,
+            "draft_blocks": [],
             "validation_errors": [],
             "response_attempts": 0,
             "step_results": [],

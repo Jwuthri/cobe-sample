@@ -23,11 +23,21 @@ The writer is a single LLM call (not a ``create_agent`` leaf), so its
 from __future__ import annotations
 
 import json
+import re
 from typing import Literal
 
 from agent_v4 import ids
+from agent_v4.leaves import LEAVES_BY_NAME
 from agent_v4.llm import writer_model_name
+from agent_v4.output_schemas import (
+    CheckoutBlock,
+    OrderLine,
+    OrderStatusBlock,
+    ProductCard,
+    ProductRecoBlock,
+)
 from agent_v4.state import AgentState
+from agent_v4.tools.orders_db import get_order
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 from langgraph.types import Command
@@ -64,8 +74,13 @@ The input payload tells you which **mode** to use. Honor it strictly:
           empty, say "I couldn't find anything matching that — try
           another search?".
         * If ``details.order`` is set, present that order info clearly.
-        * Don't talk about the cart unless ``cart.items`` is non-empty
-          AND a step actually added something.
+        * If ``details.cart_edit`` is set, the user edited or viewed their
+          cart. Confirm the change briefly (e.g. "Removed the Black
+          Hoodie") and show the resulting cart from
+          ``details.cart_edit.items`` (id, name, qty) plus the subtotal if
+          present. If that items list is empty, say the cart is now empty.
+        * Otherwise don't volunteer cart contents unless a step actually
+          added or edited the cart (``details.added`` / ``details.cart_edit``).
 
   - mode = "checkout"
       The checkout leaf ran. Use ``cart`` and ``step_results``:
@@ -90,6 +105,10 @@ Universal rules:
   - Friendly but brief. No emoji unless the user used one.
   - Don't ask for things the user already provided this conversation.
   - When listing products or orders, copy the ids EXACTLY as given.
+  - Structured cards (product lists, order details, the order summary) are
+    rendered to the user separately from your text. Introduce them naturally
+    in prose (e.g. "Here are the hoodies:") but do NOT re-dump every id, price,
+    or field in the message — the cards already show them.
 """
 
 
@@ -182,8 +201,84 @@ def _build_writer_payload(state: AgentState) -> tuple[str, WriterMode]:
     return json.dumps(payload, ensure_ascii=False, indent=2), mode
 
 
+# =============================================================================
+# Rich-reply blocks — typed payloads assembled DETERMINISTICALLY from what the
+# leaves already produced (step_results[*].details + the cart). The LLM only
+# writes the prose `message`; ids/prices in blocks are verbatim (no hallucination).
+# =============================================================================
+def _order_from_raw(raw: str | None):
+    """Resolve a structured Order from an order_status tool's raw text, if any."""
+    if not raw:
+        return None
+    match = re.search(r"(ORD-\d+)", raw, re.IGNORECASE)
+    if not match:
+        return None
+    return get_order(match.group(1))
+
+
+def _checkout_block(cart, asks: list[str]) -> CheckoutBlock:
+    items = [
+        OrderLine(
+            id=i.product_id,
+            name=i.name,
+            qty=i.quantity,
+            line_total=f"{i.line_total:.2f}",
+        )
+        for i in cart.items
+    ]
+    return CheckoutBlock(
+        items=items,
+        subtotal=f"{cart.subtotal:.2f}",
+        grand_total=f"{cart.grand_total:.2f}" if cart.grand_total is not None else None,
+        ready_to_confirm=cart.ready_to_confirm(),
+        confirmed=cart.confirmed,
+        receipt_id=cart.receipt_id,
+        asks=list(asks),
+    )
+
+
+def build_blocks(state: AgentState) -> list[dict]:
+    """Assemble the turn's typed blocks from step results + cart.
+
+    One block per structured thing a leaf produced, in order. A turn with both
+    a product_rec and an order_status step yields two blocks. Conversational /
+    smalltalk turns (no qualifying details) yield ``[]``.
+    """
+    blocks: list = []
+    checkout_done = False
+    for sr in state.step_results:
+        spec = LEAVES_BY_NAME.get(sr.sop)
+        kind = spec.output_block if spec else None
+        details = sr.details or {}
+
+        if kind == "product_reco":
+            products = [ProductCard(**p) for p in (details.get("products") or [])]
+            added = list(details.get("added") or [])
+            serv = details.get("serviceability")
+            serv_raw = (
+                serv.get("raw") if isinstance(serv, dict) else serv if isinstance(serv, str) else None
+            )
+            if products or added or serv_raw:
+                blocks.append(
+                    ProductRecoBlock(products=products, added_ids=added, serviceability=serv_raw)
+                )
+        elif kind == "order_status":
+            raw = details.get("raw")
+            if raw:
+                blocks.append(OrderStatusBlock(order=_order_from_raw(raw), raw=raw))
+        elif kind == "checkout" and not checkout_done:
+            blocks.append(_checkout_block(state.cart, sr.asks))
+            checkout_done = True
+
+    return [b.model_dump(mode="json") for b in blocks]
+
+
 def writer(state: AgentState) -> Command:
     """Outer-graph writer node. Produces the single user-facing draft.
+
+    The model writes the prose ``message`` (kept in ``draft_response`` so every
+    text path — gate, validator, emit, UI — is unchanged). Typed ``draft_blocks``
+    are assembled deterministically alongside it.
 
     Confirmation handling: when the cart is ``ready_to_confirm`` but
     ``not confirmed``, the system prompt instructs the model to end
@@ -198,7 +293,13 @@ def writer(state: AgentState) -> Command:
         ]
     )
     text = (resp.content or "").strip() if isinstance(resp.content, str) else str(resp.content)
-    return Command(goto="checkout_gate", update={"draft_response": text or "(no response)"})
+    return Command(
+        goto="checkout_gate",
+        update={
+            "draft_response": text or "(no response)",
+            "draft_blocks": build_blocks(state),
+        },
+    )
 
 
-__all__ = ["writer", "_pick_mode", "_build_writer_payload"]
+__all__ = ["writer", "build_blocks", "_pick_mode", "_build_writer_payload"]

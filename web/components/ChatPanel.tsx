@@ -1,7 +1,8 @@
 'use client';
 
 import { useEffect, useRef } from 'react';
-import type { AgentSnapshot } from '@/lib/types';
+import type { AgentSnapshot, Block } from '@/lib/types';
+import { StructuredBlocks } from '@/components/blocks';
 
 export function ChatPanel({
   snapshot,
@@ -30,18 +31,12 @@ export function ChatPanel({
         ) : (
           <ul className="flex flex-col gap-3">
             {msgs.map((m, i) => (
-              <Bubble key={i} role={m.role}>
-                {m.content}
-              </Bubble>
+              <MessageRow key={i} role={m.role} content={m.content} blocks={m.blocks} />
             ))}
             {pendingUser && msgs[msgs.length - 1]?.content !== pendingUser && (
-              <Bubble role="human">{pendingUser}</Bubble>
+              <MessageRow role="human" content={pendingUser} />
             )}
-            {pendingBot && (
-              <Bubble role="ai" pending>
-                {pendingBot}
-              </Bubble>
-            )}
+            {pendingBot && <MessageRow role="ai" content={pendingBot} pending />}
           </ul>
         )}
         <div ref={endRef} />
@@ -50,18 +45,20 @@ export function ChatPanel({
   );
 }
 
-function Bubble({
+function MessageRow({
   role,
+  content,
+  blocks,
   pending = false,
-  children,
 }: {
   role: string;
+  content: string;
+  blocks?: Block[];
   pending?: boolean;
-  children: React.ReactNode;
 }) {
   const isUser = role === 'human' || role === 'user';
   return (
-    <li className={`flex ${isUser ? 'justify-end' : 'justify-start'}`}>
+    <li className={`flex flex-col gap-1.5 ${isUser ? 'items-end' : 'items-start'}`}>
       <div
         className={`max-w-[80%] whitespace-pre-wrap break-words rounded-2xl px-3.5 py-2 text-sm leading-relaxed ${
           isUser
@@ -69,9 +66,14 @@ function Bubble({
             : 'bg-slate-800/70 text-slate-100 ring-1 ring-slate-700/50'
         } ${pending ? 'opacity-70' : ''}`}
       >
-        {children}
+        {content}
         {pending && <span className="ml-1 animate-pulse text-slate-400">▍</span>}
       </div>
+      {!isUser && blocks && blocks.length > 0 && (
+        <div className="w-full max-w-[90%]">
+          <StructuredBlocks blocks={blocks} />
+        </div>
+      )}
     </li>
   );
 }

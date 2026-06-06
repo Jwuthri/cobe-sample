@@ -68,7 +68,7 @@ def serialize_state(state: AgentState) -> dict[str, Any]:
     return {
         "user_id": state.user_id,
         "session_id": state.session_id,
-        "active_sop": state.active_sop.value if state.active_sop else None,
+        "active_sop": state.active_sop,
         "skills_loaded": list(state.skills_loaded),
         "cart": {
             "step": cart.step.value,
@@ -117,7 +117,11 @@ def serialize_state(state: AgentState) -> dict[str, Any]:
             "receipt_id": cart.receipt_id,
         },
         "messages": [
-            {"role": m.type if hasattr(m, "type") else "?", "content": str(m.content)}
+            {
+                "role": m.type if hasattr(m, "type") else "?",
+                "content": str(m.content),
+                "blocks": (getattr(m, "additional_kwargs", {}) or {}).get("blocks", []),
+            }
             for m in state.messages
         ],
         "iteration": state.iteration,
@@ -175,6 +179,7 @@ async def turn(session_id: str, req: TurnRequest) -> StreamingResponse:
         update={
             "messages": base.messages + [HumanMessage(content=req.message)],
             "draft_response": None,
+            "draft_blocks": [],
             "validation_errors": [],
             "response_attempts": 0,
             "step_results": [],
@@ -266,17 +271,23 @@ def _classify_chunk(mode: str, payload: Any) -> list[dict]:
                     out.append(
                         {
                             "type": "step",
-                            "sop": sr.sop.value,
+                            "sop": sr.sop,
                             "summary": sr.summary,
                             "asks": list(sr.asks),
-                            "next_sop": sr.next_sop.value if sr.next_sop else None,
+                            "next_sop": sr.next_sop,
                             "details": sr.details,
                         }
                     )
             elif node == "writer":
                 draft = update.get("draft_response", "")
                 if draft:
-                    out.append({"type": "writer", "draft": draft})
+                    out.append(
+                        {
+                            "type": "writer",
+                            "draft": draft,
+                            "blocks": update.get("draft_blocks") or [],
+                        }
+                    )
             elif node == "checkout_gate":
                 errs = update.get("validation_errors") or []
                 if errs:
@@ -290,7 +301,14 @@ def _classify_chunk(mode: str, payload: Any) -> list[dict]:
             elif node == "emit":
                 for m in update.get("messages") or []:
                     if isinstance(m, AIMessage):
-                        out.append({"type": "bot", "content": str(m.content)})
+                        ak = getattr(m, "additional_kwargs", {}) or {}
+                        out.append(
+                            {
+                                "type": "bot",
+                                "content": str(m.content),
+                                "blocks": ak.get("blocks", []),
+                            }
+                        )
     return out
 
 

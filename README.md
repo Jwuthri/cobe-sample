@@ -597,3 +597,17 @@ uvicorn server.main_v4:app --reload --port 8001
 Model env resolves `AGENT_V4_OPENAI_MODEL` → `AGENT_V2_OPENAI_MODEL` →
 `gpt-4.1-mini` (writer: `AGENT_V4_WRITER_MODEL` → `AGENT_V2_WRITER_MODEL`),
 so it runs against the existing `.env` with no new config.
+
+### Structured "rich reply" output
+
+The writer emits `{message, blocks[]}` instead of a bare string. `message` is
+the prose (still in `draft_response`, so the gate/validator/emit/UI text paths
+are unchanged); `blocks` is an ordered list of **typed** payloads
+(`product_reco` / `order_status` / `checkout`) defined in
+`agent_v4/output_schemas.py`. Blocks are assembled **deterministically** from
+what the leaves already produced (`step_results[*].details` + cart) — the LLM
+only writes the prose, so ids/prices are verbatim. A single turn carries 0, 1,
+or many blocks ("show hoodies and where's my order" → a product block **and** an
+order block); a plain FAQ/greeting carries none. Blocks ride on
+`AIMessage.additional_kwargs` → the SSE `bot` event + `/api/state` snapshot →
+the web `ChatPanel` renders them as cards (`web/components/blocks.tsx`).

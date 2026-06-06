@@ -54,13 +54,55 @@ export interface Cart {
   receipt_id: string | null;
 }
 
+// ---- Writer "rich reply" blocks (see agent_v4/output_schemas.py) ----
+export interface ProductCard {
+  id: string;
+  name: string;
+  price: string;
+  tags: string[];
+}
+
+export interface OrderCard {
+  id: string;
+  status: string;
+  items: string[];
+  tracking_url: string | null;
+}
+
+export interface OrderLine {
+  id: string;
+  name: string;
+  qty: number;
+  line_total: string;
+}
+
+export type Block =
+  | { kind: 'product_reco'; products: ProductCard[]; added_ids: string[]; serviceability: string | null }
+  | { kind: 'order_status'; order: OrderCard | null; raw: string | null }
+  | {
+      kind: 'checkout';
+      items: OrderLine[];
+      subtotal: string | null;
+      grand_total: string | null;
+      ready_to_confirm: boolean;
+      confirmed: boolean;
+      receipt_id: string | null;
+      asks: string[];
+    };
+
+export interface ChatMessage {
+  role: string;
+  content: string;
+  blocks?: Block[];
+}
+
 export interface AgentSnapshot {
   user_id: string;
   session_id: string;
   active_sop: SOPName | null;
   skills_loaded: string[];
   cart: Cart;
-  messages: { role: string; content: string }[];
+  messages: ChatMessage[];
   iteration: number;
   done: boolean;
 }
@@ -75,10 +117,10 @@ export type ServerEvent =
   | { type: 'tool_start'; name: string; args: Record<string, unknown> }
   | { type: 'tool_end'; name: string; result: string }
   | { type: 'step'; sop: SOPName; summary: string; asks: string[]; next_sop: SOPName | null; details: Record<string, unknown> | null }
-  | { type: 'writer'; draft: string }
+  | { type: 'writer'; draft: string; blocks?: Block[] }
   | { type: 'gate'; rejected: boolean; errors: string[] }
   | { type: 'validator'; errors: string[] }
-  | { type: 'bot'; content: string }
+  | { type: 'bot'; content: string; blocks?: Block[] }
   | { type: 'end' }
   | { type: 'error'; content: string };
 

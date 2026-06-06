@@ -51,18 +51,31 @@ class SupervisorDecision(BaseModel):
 
 _CLASSIFIER_PROMPT = f"""\
 You are routing the latest user message in a multi-agent shopping
-assistant. Decide whether more leaf work is needed this turn and, if
-so, which leaf to call next.
+assistant. You are called REPEATEDLY within a single turn: each call you
+can see the steps already run this turn and their results (under "Step
+results this turn"). Decide whether more leaf work is needed and, if so,
+which leaf to call next — handle ONE not-yet-handled part of the user's
+message per call, and use prior step results to inform the choice.
 
 The leaves and what they DO:
 
 {routing_catalog()}
 
-When to set done=True (no leaf work needed):
+When to set done=True (no MORE leaf work this turn):
   - Smalltalk / greetings / off-topic / vague chatter ("hi", "thanks",
     "lol", "what can you do"). The writer will reply conversationally.
-  - The most recent step_result has non-empty ``asks`` — the user must
-    respond before any more leaf work makes sense.
+  - EVERY distinct request in the user's latest message has already been
+    handled by a step this turn. Check "Step results this turn": if the
+    user asked for TWO things (e.g. a product question AND an order-status
+    question) and only one of them has a step so far, you are NOT done —
+    pick the leaf for the OTHER part.
+
+  IMPORTANT: a leaf having asked the user a follow-up question (its
+  ``asks`` is non-empty) does NOT by itself mean the turn is done — it
+  only means that one leaf is now waiting on the user. If a DIFFERENT
+  part of the message is still unhandled, route to its leaf now. Only set
+  done=True once nothing in the message is left to handle. Never invent a
+  request the user didn't make.
 
 How to pick a leaf — read CAREFULLY:
 
@@ -90,6 +103,13 @@ How to pick a leaf — read CAREFULLY:
      other options", "what's your return policy" — route to
      **product_rec**, NOT checkout. Don't trap the user in checkout
      for browse-style questions.
+
+  3b) **Cart edits / cart questions -> product_rec, even mid-checkout.**
+     "remove the hoodie", "take P-2 out", "change the quantity to 2",
+     "make it 1", "what's in my cart", "why are there 2 hoodies" — these
+     edit or inspect the CART CONTENTS and belong to product_rec (it owns
+     add / remove / quantity / view). The checkout leaf is fulfillment
+     only and cannot add or remove products.
 
   4) **Serviceability questions** ("do you deliver to <city/zip>?",
      "what shipping options for <zip>?") with NO active checkout
@@ -205,10 +225,12 @@ def supervisor(state: "AgentState") -> Command:
         return Command(goto="writer", update={"iteration": 0})
 
     # 2. If the most recent step explicitly hints a next leaf, follow it.
-    #    The cheap fast-path for compound asks (product_rec -> checkout).
+    #    Deterministic output-aware handoff (e.g. product_rec added an item
+    #    -> checkout). This is the coded version of "use a leaf's output to
+    #    decide where to look next".
     if state.step_results:
         last = state.step_results[-1]
-        if last.next_sop is not None:
+        if last.next_sop is not None and last.next_sop not in {r.sop for r in state.step_results[:-1]}:
             return Command(
                 goto=f"{last.next_sop}_wrapper",
                 update={
@@ -216,10 +238,12 @@ def supervisor(state: "AgentState") -> Command:
                     "iteration": state.iteration + 1,
                 },
             )
-        # 3. The last leaf is waiting on the user (it surfaced `asks`).
-        #    No point running another leaf — send to writer.
-        if last.asks:
-            return Command(goto="writer", update={"iteration": 0})
+
+    # 3. A leaf returning `asks` no longer ends the turn: the classifier is
+    #    re-consulted (it sees the prior step results + their outputs) so a
+    #    compound message's OTHER intents still get routed. The classifier's
+    #    "done" rule decides when nothing is left to handle, and the re-run
+    #    guard (step 6) + MAX_ITERATIONS keep the loop finite.
 
     # 4. Smalltalk shortcut: skip the LLM classifier on obvious greetings.
     if not state.step_results and _is_likely_smalltalk(state.last_user_message()):

@@ -12,7 +12,7 @@ from agent_v4 import ids
 from agent_v4.checkout import CartService
 from agent_v4.leaves import make_product_rec_wrapper
 from agent_v4.state import AgentState
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 
 def _state_with_msgs(*msgs) -> AgentState:
