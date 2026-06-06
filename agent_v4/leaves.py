@@ -36,7 +36,7 @@ from agent_v4.tools.catalog_tools import get_product, search_products
 from agent_v4.tools.checkout_tools import CHECKOUT_TOOLS, add_item
 from agent_v4.tools.order_tools import get_order_status, list_recent_orders
 from agent_v4.tools.serviceability_tools import check_serviceability
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import HumanMessage, ToolMessage
 from langgraph.config import get_stream_writer
 from langgraph.types import Command
 
@@ -226,13 +226,6 @@ def _stream_subagent(
     if result is not None:
         return result
     return agent.invoke(input_state, config=config, context=context)
-
-
-def _last_ai_text(messages: list) -> str:
-    for m in reversed(messages):
-        if isinstance(m, AIMessage) and m.content:
-            return str(m.content)
-    return ""
 
 
 def _extract_products_from_messages(messages) -> list[dict]:

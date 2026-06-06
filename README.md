@@ -560,3 +560,40 @@ what changed:
 - **Checkout is in `sops/`**: symmetric with the other SOPs.
 - **Green / red caps**: `P-4` (green) and `P-5` (red) so colored-
   product demos work.
+
+## `agent_v4/` — declarative, config-driven leaves (separate package)
+
+> Naming note: this is the **`agent_v4` package**, distinct from the
+> "v4 loop architecture" term above (which describes agent_v2's internal
+> supervisor-loop iteration). `agent_v4/` is a parallel package, like
+> `agent_v3/`; `agent_v2` is unchanged.
+
+Same runtime shape as v2 (**1 orchestrator → n leaves → orchestrator →
+writer → gate → validator → emit**), but each leaf is now *defined as
+data* and the graph topology is *generated* from a registry — the
+"Declarative Agent Builder" idea applied to the existing LangGraph flow.
+
+| Piece | File | What's new |
+| --- | --- | --- |
+| Declarative builder | `agent_v4/configurable.py` | `AgentConfig` (model, prompt, tools, skills, guardrails, middleware) → `build_agent()` → the same `create_agent(...)` v2 wrote by hand. Registries + `build_catalog()` for a future builder UI. |
+| Leaf registry | `agent_v4/leaves.py` | The 3 leaves as `AgentConfig` + their wrapper post-processors, collected in `LEAVES`. **Add a leaf = append a `LeafSpec`** — `graph.py`/`supervisor.py` adapt automatically. |
+| Platform defaults | `agent_v4/registry_defaults.py` | `register_platform_defaults()` registers the v2 tools, checkout skills, and middleware by name. |
+| Generated graph | `agent_v4/graph.py` | `build_graph()` loops `LEAVES` to wire one `<name>_wrapper` per leaf; gate/validator/emit unchanged. |
+| Leaf ids | `agent_v4/ids.py` | Plain string ids replace v2's `SOPName` enum, keeping the leaf set data-driven. |
+
+What the builder fixed vs the design doc: `ModelConfig.temperature`/
+`max_tokens` are actually applied; `build_agent` forwards
+`context_schema`/`checkpointer`/`store`; declarative `HttpTool` strips
+placeholder-consumed args (e.g. `{api_token}`) from the request payload.
+
+```bash
+# tests (keyless): 65 passing
+.venv/bin/python -m pytest tests_v4 -q
+# server (same SSE contract / port as v2 — run one or the other)
+uvicorn server.main_v4:app --reload --port 8001
+# langgraph: graph registered as `agent_v4` in langgraph.json
+```
+
+Model env resolves `AGENT_V4_OPENAI_MODEL` → `AGENT_V2_OPENAI_MODEL` →
+`gpt-4.1-mini` (writer: `AGENT_V4_WRITER_MODEL` → `AGENT_V2_WRITER_MODEL`),
+so it runs against the existing `.env` with no new config.

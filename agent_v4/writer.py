@@ -4,10 +4,10 @@ Wrappers no longer produce user-facing text; they produce structured
 ``StepResult`` records. The writer composes ONE reply per turn,
 choosing one of three **modes**:
 
-  - ``smalltalk``  — no SOP ran this turn (greeting, off-topic, etc.).
+  - ``smalltalk``  — no leaf ran this turn (greeting, off-topic, etc.).
                      Reply briefly and conversationally. Do NOT mention
                      the cart, blockers, or checkout in any way.
-  - ``checkout``   — checkout was the active SOP. Surface cart state,
+  - ``checkout``   — checkout was the active leaf. Surface cart state,
                      outstanding asks, totals, blockers as needed.
   - ``info``       — product_rec or order_status ran. Summarize their
                      step results. Don't mention the cart unless an
@@ -15,17 +15,19 @@ choosing one of three **modes**:
 
 This mode-aware framing is what prevents the writer from talking
 about "your cart is empty" on a greeting turn.
+
+The writer is a single LLM call (not a ``create_agent`` leaf), so its
+``ModelConfig`` lives here rather than in :mod:`agent_v4.leaves`.
 """
 
 from __future__ import annotations
 
 import json
-import os
 from typing import Literal
 
-from agent_v4.llm import model_name
+from agent_v4 import ids
+from agent_v4.llm import writer_model_name
 from agent_v4.state import AgentState
-from agent_v4.supervisor import SOPName
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 from langgraph.types import Command
@@ -66,7 +68,7 @@ The input payload tells you which **mode** to use. Honor it strictly:
           AND a step actually added something.
 
   - mode = "checkout"
-      The checkout SOP ran. Use ``cart`` and ``step_results``:
+      The checkout leaf ran. Use ``cart`` and ``step_results``:
         * Summarize what happened (added item, captured address, etc.).
         * If ``step_results[*].asks`` is non-empty, list them clearly
           so the user knows exactly what to provide next.
@@ -91,14 +93,10 @@ Universal rules:
 """
 
 
-def _writer_model_name() -> str:
-    return os.environ.get("AGENT_V4_WRITER_MODEL") or model_name()
-
-
 def _pick_mode(state: AgentState) -> WriterMode:
     """Decide which framing the writer should use."""
     sops_this_turn = {r.sop for r in state.step_results}
-    if SOPName.CHECKOUT in sops_this_turn:
+    if ids.CHECKOUT in sops_this_turn:
         return "checkout"
     if sops_this_turn:  # product_rec or order_status ran
         return "info"
@@ -107,9 +105,6 @@ def _pick_mode(state: AgentState) -> WriterMode:
 
 def _cart_summary_for_checkout(cart) -> dict:
     """Cart fields the writer needs when mode='checkout'."""
-    # Filter blockers to ones the user can actually act on. The model
-    # doesn't need to hear about "stale_shipping" or "stale_tax" —
-    # those are internal mid-flow states, not asks.
     USER_ACTIONABLE = {
         "empty_cart",
         "missing_identity",
@@ -193,11 +188,9 @@ def writer(state: AgentState) -> Command:
     Confirmation handling: when the cart is ``ready_to_confirm`` but
     ``not confirmed``, the system prompt instructs the model to end
     its message with a clear "Reply 'yes' to place the order" line.
-    The next turn, the checkout sub-agent sees the user's 'yes' and
-    calls confirm_checkout. No HITL middleware needed.
     """
     payload, _mode = _build_writer_payload(state)
-    chat = ChatOpenAI(model=_writer_model_name(), temperature=0.3)
+    chat = ChatOpenAI(model=writer_model_name(), temperature=0.3)
     resp = chat.invoke(
         [
             SystemMessage(content=WRITER_SYSTEM),

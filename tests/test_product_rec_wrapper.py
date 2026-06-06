@@ -26,6 +26,11 @@ def _make_stub_agent(side_effect_on_cart=None):
     """
 
     class Stub:
+        def stream(self, payload, config=None, context=None, stream_mode=None):
+            if side_effect_on_cart is not None:
+                side_effect_on_cart(context.cart_service)
+            yield ("values", {"messages": [AIMessage(content="ok")]})
+
         def invoke(self, payload, context=None, **_kw):
             if side_effect_on_cart is not None:
                 side_effect_on_cart(context.cart_service)
@@ -94,6 +99,10 @@ def test_wrapper_passes_recent_history_not_just_last_message():
     captured: dict = {}
 
     class CapturingStub:
+        def stream(self, payload, config=None, context=None, stream_mode=None):
+            captured["messages"] = payload["messages"]
+            yield ("values", {"messages": [AIMessage(content="done")]})
+
         def invoke(self, payload, context=None, **_kw):
             captured["messages"] = payload["messages"]
             return {"messages": [AIMessage(content="done")]}

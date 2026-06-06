@@ -1,23 +1,26 @@
-"""Supervisor — bounded loop, conversation-aware.
+"""Supervisor — bounded loop, conversation-aware, data-driven over LEAVES.
 
 Two responsibilities per call:
   1. Decide whether the turn is **done** (route to writer) or whether
-     another SOP needs to run.
-  2. If not done, pick the next SOP — using either an explicit
+     another leaf needs to run.
+  2. If not done, pick the next leaf — using either an explicit
      ``next_sop`` hint from the previous step result, or a fresh
      OpenAI classification that sees the conversation history + the
      accumulated step results + the current cart step.
 
-``MAX_ITERATIONS`` caps the loop so a bad classifier or recursive
-hand-off can't burn through tokens.
+The *topology* (which leaves exist, what the classifier may pick) comes
+from :data:`agent_v4.leaves.LEAVES`; the *routing policy* (the prose and
+the empty-cart / re-run / smalltalk guards) is domain code that names
+specific leaves via :mod:`agent_v4.ids`. ``MAX_ITERATIONS`` caps the loop.
 """
 
 from __future__ import annotations
 
-from enum import Enum
 from typing import TYPE_CHECKING
 
+from agent_v4 import ids
 from agent_v4.checkout.cart import CheckoutStep
+from agent_v4.leaves import LEAF_NAMES, routing_catalog
 from agent_v4.llm import classifier_client, model_name
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from langgraph.types import Command
@@ -32,67 +35,53 @@ MAX_ITERATIONS = 4
 HISTORY_TURNS = 8
 
 
-class SOPName(str, Enum):
-    CHECKOUT = "checkout"
-    ORDER_STATUS = "order_status"
-    PRODUCT_REC = "product_rec"
-
-
 class SupervisorDecision(BaseModel):
-    """Structured-output shape returned by the classifier."""
+    """Structured-output shape returned by the classifier.
 
-    done: bool = Field(description="True when no more SOP work is needed this turn.")
-    next_sop: SOPName | None = Field(
-        default=None, description="Required when done=False; ignored otherwise."
+    ``next_sop`` is a leaf id; it's validated against the live leaf set
+    after parsing (see :func:`classify_with_history`).
+    """
+
+    done: bool = Field(description="True when no more leaf work is needed this turn.")
+    next_sop: str | None = Field(
+        default=None, description="Required when done=False; one of the valid leaf ids."
     )
     reason: str = Field(default="", description="One sentence justification.")
 
 
-_CLASSIFIER_PROMPT = """\
+_CLASSIFIER_PROMPT = f"""\
 You are routing the latest user message in a multi-agent shopping
-assistant. Decide whether more SOP work is needed this turn and, if
-so, which SOP to call next.
+assistant. Decide whether more leaf work is needed this turn and, if
+so, which leaf to call next.
 
-The three SOPs and what they DO:
+The leaves and what they DO:
 
-  - product_rec    Pre-purchase questions: search the catalog, look up
-                   a single product, AND answer delivery-area questions
-                   ("do you ship to <city/zip>?", "what shipping is
-                   available in 94110?"). Use this for ANY question
-                   that doesn't require a cart.
-  - checkout       The user is actively trying to buy: they want a cart
-                   opened, or they're providing data the in-progress
-                   checkout asked for (name, address, zip *as part of
-                   checkout flow*, delivery option, payment, "yes" to
-                   confirm).
-  - order_status   The user is asking about a PAST order's status,
-                   tracking, or delivery (order ids look like ORD-* or
-                   RCPT-*).
+{routing_catalog()}
 
-When to set done=True (no SOP work needed):
+When to set done=True (no leaf work needed):
   - Smalltalk / greetings / off-topic / vague chatter ("hi", "thanks",
     "lol", "what can you do"). The writer will reply conversationally.
   - The most recent step_result has non-empty ``asks`` — the user must
-    respond before any more SOP work makes sense.
+    respond before any more leaf work makes sense.
 
-How to pick a SOP — read CAREFULLY:
+How to pick a leaf — read CAREFULLY:
 
-  1) **Empty cart → product_rec by default.** If ``cart_step`` is
+  1) **Empty cart -> product_rec by default.** If ``cart_step`` is
      ``collecting_products`` (cart has no items), ANY shopping intent
      — including "add X to my cart", "buy X", "I want X", "get me
      X" — goes to **product_rec**. Product_rec will identify the
      product (via search_products or check_serviceability), add it
      to the cart, and hand off to checkout via ``next_sop``. NEVER
      route to checkout from an empty cart for an "add to cart"
-     request: the checkout SOP has nothing meaningful to do without
+     request: the checkout leaf has nothing meaningful to do without
      items.
 
-  2) **Mid-checkout data provision → checkout.** If the cart is
+  2) **Mid-checkout data provision -> checkout.** If the cart is
      NON-empty (cart_step is past collecting_products) AND the user
      is providing data the checkout flow is currently asking for
      (their name, a shipping address as part of a buy, a delivery
      option, a payment method, "yes" / "y" / "confirm" to a pending
-     order summary) → checkout.
+     order summary) -> checkout.
 
   3) **Mid-checkout escape for browse questions.** If the user is
      mid-checkout BUT just asked a generic pre-purchase question
@@ -104,16 +93,17 @@ How to pick a SOP — read CAREFULLY:
 
   4) **Serviceability questions** ("do you deliver to <city/zip>?",
      "what shipping options for <zip>?") with NO active checkout
-     context → **product_rec** (it has check_serviceability).
+     context -> **product_rec** (it has check_serviceability).
 
-  5) **Compound asks** like "find me a green cap and pay" →
+  5) **Compound asks** like "find me a green cap and pay" ->
      product_rec first; checkout is queued via ``next_sop``.
 
   6) **Past-order tracking** ("where's my order ORD-7?",
-     "RCPT-9000 status?") → order_status.
+     "RCPT-9000 status?") -> order_status.
 
-Never invent a SOP. Default to done=True for anything that doesn't
-clearly match one of the three.
+Valid next_sop values: {", ".join(LEAF_NAMES)}.
+Never invent a leaf. Default to done=True for anything that doesn't
+clearly match one of the leaves.
 """
 
 
@@ -149,7 +139,6 @@ def _is_likely_smalltalk(user_msg: str) -> bool:
         return False
     if msg in _SMALLTALK_KEYWORDS:
         return True
-    # "hello how are you", "hi there"
     words = [w for w in msg.replace(",", " ").split() if w not in {"there", "you", "are", "how"}]
     return bool(words) and all(w in _SMALLTALK_KEYWORDS for w in words)
 
@@ -168,11 +157,18 @@ def _format_step_results(results: list["StepResult"]) -> str:
     if not results:
         return "(none)"
     return "\n".join(
-        f"- {r.sop.value}: {r.summary}"
+        f"- {r.sop}: {r.summary}"
         + (f" asks={r.asks}" if r.asks else "")
-        + (f" next_sop={r.next_sop.value}" if r.next_sop else "")
+        + (f" next_sop={r.next_sop}" if r.next_sop else "")
         for r in results
     )
+
+
+def _coerce_next_sop(value: str | None) -> str | None:
+    """Validate the classifier's pick against the live leaf set."""
+    if value and value in LEAF_NAMES:
+        return value
+    return None
 
 
 def classify_with_history(state: "AgentState") -> SupervisorDecision:
@@ -194,96 +190,75 @@ def classify_with_history(state: "AgentState") -> SupervisorDecision:
     )
     parsed = resp.choices[0].message.parsed
     if parsed is None:
-        return SupervisorDecision(done=False, next_sop=SOPName.PRODUCT_REC, reason="fallback")
-    if not parsed.done and parsed.next_sop is None:
-        # Defensive: classifier said not-done but didn't pick a SOP.
-        parsed = parsed.model_copy(update={"next_sop": SOPName.PRODUCT_REC})
-    return parsed
+        return SupervisorDecision(done=False, next_sop=ids.DEFAULT_SOP, reason="fallback")
+    next_sop = _coerce_next_sop(parsed.next_sop)
+    if not parsed.done and next_sop is None:
+        # Classifier said not-done but didn't name a valid leaf.
+        next_sop = ids.DEFAULT_SOP
+    return parsed.model_copy(update={"next_sop": next_sop})
 
 
 def supervisor(state: "AgentState") -> Command:
-    """Outer-graph supervisor node. Routes to a SOP wrapper or to the writer."""
+    """Outer-graph supervisor node. Routes to a leaf wrapper or to the writer."""
     # 1. Hard cap: never loop forever.
     if state.iteration >= MAX_ITERATIONS:
         return Command(goto="writer", update={"iteration": 0})
 
-    # 2. If the most recent step explicitly hints a next SOP, follow it.
-    #    This is the cheap fast-path for compound asks
-    #    (product_rec → checkout) and similar planned hand-offs.
+    # 2. If the most recent step explicitly hints a next leaf, follow it.
+    #    The cheap fast-path for compound asks (product_rec -> checkout).
     if state.step_results:
         last = state.step_results[-1]
         if last.next_sop is not None:
             return Command(
-                goto=f"{last.next_sop.value}_wrapper",
+                goto=f"{last.next_sop}_wrapper",
                 update={
                     "active_sop": last.next_sop,
                     "iteration": state.iteration + 1,
                 },
             )
-        # 3. The last SOP has nothing more to do AND is waiting on the
-        #    user (it surfaced `asks`). No point running another SOP —
-        #    user must respond first. Send to writer.
+        # 3. The last leaf is waiting on the user (it surfaced `asks`).
+        #    No point running another leaf — send to writer.
         if last.asks:
             return Command(goto="writer", update={"iteration": 0})
 
-    # 4. Smalltalk shortcut: skip the LLM classifier on obvious
-    #    greetings / off-topic chatter so we don't run a SOP for "hi".
+    # 4. Smalltalk shortcut: skip the LLM classifier on obvious greetings.
     if not state.step_results and _is_likely_smalltalk(state.last_user_message()):
         return Command(goto="writer", update={"iteration": 0})
 
-    # 5. Classify with full context (recent history + step results +
-    #    cart step).
+    # 5. Classify with full context.
     decision = classify_with_history(state)
     if decision.done:
         return Command(goto="writer", update={"iteration": 0})
-    assert decision.next_sop is not None  # narrowed by classify_with_history
+    next_sop = decision.next_sop or ids.DEFAULT_SOP
 
-    # 5b. Empty-cart safety net.
-    #
-    #     "add the cap to my cart" / "buy X" / "I want X" sometimes
-    #     trips the classifier into picking ``checkout`` because of the
-    #     word "cart"/"buy". But checkout has nothing useful to do with
-    #     an empty cart — the catalog needs to find the product first.
-    #
-    #     We override the decision here. Same defense-in-depth pattern
-    #     as ``checkout_gate``: trust the classifier 95% of the time,
-    #     but never let it pick a SOP that's structurally unable to
-    #     make progress. Skipped when we already ran product_rec this
-    #     turn (the rerun guard below will route to writer).
+    # 5b. Empty-cart safety net: never let the classifier pick a leaf that's
+    #     structurally unable to make progress (checkout with an empty cart).
     if (
-        decision.next_sop == SOPName.CHECKOUT
+        next_sop == ids.CHECKOUT
         and state.cart.step == CheckoutStep.COLLECTING_PRODUCTS
-        and SOPName.PRODUCT_REC not in {r.sop for r in state.step_results}
+        and ids.PRODUCT_REC not in {r.sop for r in state.step_results}
     ):
-        decision = decision.model_copy(
-            update={
-                "next_sop": SOPName.PRODUCT_REC,
-                "reason": f"empty-cart override (was: {decision.reason or 'checkout'})",
-            }
-        )
+        next_sop = ids.PRODUCT_REC
 
-    # 6. Don't re-enter the same SOP we already ran this turn. If the
-    #    classifier insists on the same SOP a second time, the SOP has
-    #    already produced its step result — treat as done.
+    # 6. Don't re-enter the same leaf we already ran this turn.
     already_ran = {r.sop for r in state.step_results}
-    if decision.next_sop in already_ran:
+    if next_sop in already_ran:
         return Command(goto="writer", update={"iteration": 0})
 
     return Command(
-        goto=f"{decision.next_sop.value}_wrapper",
+        goto=f"{next_sop}_wrapper",
         update={
-            "active_sop": decision.next_sop,
+            "active_sop": next_sop,
             "iteration": state.iteration + 1,
         },
     )
 
 
-# Kept for back-compat with v3 imports — tests / external callers can
-# still ``from agent_v4.supervisor import classify``.
-def classify(user_msg: str) -> SOPName:
-    """Legacy one-shot classifier (no history). Avoid in new code."""
+# Kept for back-compat with callers that imported a one-shot classifier.
+def classify(user_msg: str) -> str:
+    """Legacy one-shot classifier (no history). Returns a leaf id."""
     if not user_msg.strip():
-        return SOPName.PRODUCT_REC
+        return ids.DEFAULT_SOP
     client = classifier_client()
     resp = client.chat.completions.parse(
         model=model_name(),
@@ -294,6 +269,6 @@ def classify(user_msg: str) -> SOPName:
         response_format=SupervisorDecision,
     )
     parsed = resp.choices[0].message.parsed
-    if parsed is None or parsed.next_sop is None:
-        return SOPName.PRODUCT_REC
-    return parsed.next_sop
+    if parsed is None:
+        return ids.DEFAULT_SOP
+    return _coerce_next_sop(parsed.next_sop) or ids.DEFAULT_SOP
