@@ -164,7 +164,6 @@ async def turn(session_id: str, req: TurnRequest) -> StreamingResponse:
       {type:"tool_end", name:"...", result:"..."}
       {type:"step", sop:"checkout", summary:"...", asks:[...], next_sop:null}
       {type:"writer", draft:"..."}
-      {type:"gate", rejected:true, errors:[...]}
       {type:"validator", errors:[...]}
       {type:"bot", content:"final assistant message"}
       {type:"state", snapshot:{...full cart+state...}}
@@ -287,12 +286,6 @@ def _classify_chunk(mode: str, payload: Any) -> list[dict]:
                             "draft": draft,
                             "blocks": update.get("draft_blocks") or [],
                         }
-                    )
-            elif node == "checkout_gate":
-                errs = update.get("validation_errors") or []
-                if errs:
-                    out.append(
-                        {"type": "gate", "rejected": True, "errors": [e.detail for e in errs]}
                     )
             elif node == "validator":
                 errs = update.get("validation_errors") or []

@@ -42,7 +42,7 @@ from agent_v4.tools.checkout_tools import (
 )
 from agent_v4.tools.order_tools import get_order_status, list_recent_orders
 from agent_v4.tools.serviceability_tools import check_serviceability
-from langchain_core.messages import HumanMessage, ToolMessage
+from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langgraph.config import get_stream_writer
 from langgraph.types import Command
 
@@ -130,9 +130,10 @@ Your tools:
     to add_item.
 
   * **"remove the hoodie", "remove P-2", "take the cap out", "delete the
-    second one", "I don't want the shoes anymore"** → remove_item with
-    the right product_id. Call get_cart_summary() first if you need to
-    see the cart / resolve which line they mean.
+    second one", "I don't want the shoes anymore"** → this is a CART edit,
+    NOT a search. Do NOT call search_products. The current cart contents
+    are shown to you above (or call get_cart_summary); find the matching
+    line and call remove_item(product_id) — or set_quantity(product_id, 0).
 
   * **"make it 2", "change the hoodie to 3", "I want two of those"** →
     set_quantity(product_id, qty). set_quantity(product_id, 0) removes it.
@@ -191,9 +192,19 @@ CHECKOUT_CONFIG = AgentConfig(
 
 PRODUCT_REC_CONFIG = AgentConfig(
     name="product_rec",
-    description="Pre-purchase search, product lookup, serviceability, add-to-cart.",
+    description="Browse + cart management: search, lookup, serviceability, add/remove/qty/view.",
     system_prompt=PRODUCT_REC_PROMPT,
-    tools=_registry_tools([search_products, get_product, check_serviceability, add_item]),
+    tools=_registry_tools(
+        [
+            search_products,
+            get_product,
+            check_serviceability,
+            add_item,
+            remove_item,
+            set_quantity,
+            get_cart_summary,
+        ]
+    ),
     middleware=[MiddlewareSpec(name="log_tool_calls")],
 )
 
@@ -405,9 +416,21 @@ def make_product_rec_wrapper(agent: Any) -> Callable[[AgentState], Command]:
 
         # Pass recent conversation history so the subagent can resolve
         # pronouns like "them" / "those" to products it just presented.
-        history = state.messages[-_PRODUCT_REC_HISTORY_TURNS:]
+        history = list(state.messages[-_PRODUCT_REC_HISTORY_TURNS:])
         if not history:
             history = [HumanMessage(content=state.last_user_message())]
+        # Give the agent the current cart so it can EDIT it (resolve "the
+        # hoodie" -> a product id, remove, change quantity) without searching
+        # the catalog. Without this it tends to treat "remove the hoodie" as
+        # a search.
+        if state.cart.items:
+            cart_note = (
+                "Current cart: "
+                + "; ".join(f"{i.product_id} {i.name} x{i.quantity}" for i in state.cart.items)
+                + ". To edit it, use remove_item / set_quantity — do NOT search "
+                "the catalog to remove or change an item already in the cart."
+            )
+            history = [SystemMessage(content=cart_note), *history]
 
         result = _stream_subagent(agent, {"messages": history}, context=ctx)
 

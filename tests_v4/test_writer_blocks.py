@@ -35,7 +35,7 @@ def test_writer_returns_message_and_blocks_for_product_rec():
     with patch("agent_v4.writer.ChatOpenAI", FakeChat):
         cmd = writer(s)
     assert isinstance(cmd, Command)
-    assert cmd.goto == "checkout_gate"
+    assert cmd.goto == "validator"
     assert cmd.update["draft_response"] == "Here are some options:"
     blocks = cmd.update["draft_blocks"]
     assert len(blocks) == 1

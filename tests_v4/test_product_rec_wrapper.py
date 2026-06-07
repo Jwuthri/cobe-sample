@@ -105,3 +105,40 @@ def test_wrapper_starts_from_existing_cart_items():
     cmd = wrapper(state)
     sr = cmd.update["step_results"][0]
     assert sr.details["added"] == ["P-2"]
+
+
+def test_wrapper_reports_removal_as_cart_edit():
+    # "remove the hoodie" -> product_rec removes it; the wrapper reports a
+    # cart_edit (NOT "no products matched") and does NOT hand off to checkout.
+    svc = CartService()
+    svc.add_item("P-2")
+    state = _state_with_msgs(HumanMessage(content="remove the hoodie"))
+    state = state.model_copy(update={"cart": svc.cart})
+
+    wrapper = make_product_rec_wrapper(StubAgent(on_cart=lambda s: s.remove_item("P-2")))
+    cmd = wrapper(state)
+    sr = cmd.update["step_results"][0]
+    assert sr.next_sop is None
+    assert "removed" in sr.summary.lower()
+    assert sr.details and "cart_edit" in sr.details
+    assert "P-2" in sr.details["cart_edit"]["removed"]
+    assert cmd.update["cart"].items == []
+
+
+def test_wrapper_reports_view_cart_when_get_cart_summary_called():
+    svc = CartService()
+    svc.add_item("P-2")
+    state = _state_with_msgs(HumanMessage(content="what's in my cart"))
+    state = state.model_copy(update={"cart": svc.cart})
+
+    msgs = [
+        ToolMessage(content="Cart CART-1 ...", name="get_cart_summary", tool_call_id="t1"),
+        AIMessage(content="here's your cart"),
+    ]
+    wrapper = make_product_rec_wrapper(StubAgent(messages=msgs))
+    cmd = wrapper(state)
+    sr = cmd.update["step_results"][0]
+    assert sr.summary == "showed the cart"
+    assert sr.next_sop is None
+    assert sr.details and "cart_edit" in sr.details
+    assert sr.details["cart_edit"]["items"][0]["id"] == "P-2"

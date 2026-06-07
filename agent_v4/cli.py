@@ -175,12 +175,6 @@ def _process_update_event(node: str, update: dict, log: EventLog, state: AgentSt
             if len(short) > 200:
                 short = short[:200] + "…"
             log.add("WRITER", short)
-    elif node == "checkout_gate":
-        if update.get("validation_errors"):
-            log.add(
-                "GATE",
-                "rejected: " + "; ".join(e.detail for e in update["validation_errors"]),
-            )
     elif node == "validator":
         if update.get("validation_errors"):
             log.add("VALIDATOR", "; ".join(e.code for e in update["validation_errors"]))

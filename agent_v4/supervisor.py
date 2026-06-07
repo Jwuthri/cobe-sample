@@ -127,42 +127,6 @@ clearly match one of the leaves.
 """
 
 
-_SMALLTALK_KEYWORDS = {
-    "hi",
-    "hello",
-    "hey",
-    "yo",
-    "sup",
-    "thanks",
-    "thank you",
-    "ty",
-    "ok",
-    "okay",
-    "cool",
-    "nice",
-    "lol",
-    "bye",
-    "goodbye",
-    "see you",
-}
-
-
-def _is_likely_smalltalk(user_msg: str) -> bool:
-    """Cheap heuristic to skip the LLM classifier for obvious greetings.
-
-    Conservative: only triggers when the message is short AND every
-    significant token is a known greeting/smalltalk word. Real shopping
-    intents (even short ones like "buy P-1") fall through to the LLM.
-    """
-    msg = user_msg.strip().lower().rstrip("!?.")
-    if not msg or len(msg) > 40:
-        return False
-    if msg in _SMALLTALK_KEYWORDS:
-        return True
-    words = [w for w in msg.replace(",", " ").split() if w not in {"there", "you", "are", "how"}]
-    return bool(words) and all(w in _SMALLTALK_KEYWORDS for w in words)
-
-
 def _format_history(messages: list[BaseMessage]) -> str:
     lines: list[str] = []
     for m in messages:
@@ -245,11 +209,8 @@ def supervisor(state: "AgentState") -> Command:
     #    "done" rule decides when nothing is left to handle, and the re-run
     #    guard (step 6) + MAX_ITERATIONS keep the loop finite.
 
-    # 4. Smalltalk shortcut: skip the LLM classifier on obvious greetings.
-    if not state.step_results and _is_likely_smalltalk(state.last_user_message()):
-        return Command(goto="writer", update={"iteration": 0})
-
-    # 5. Classify with full context.
+    # 4. Classify with full context. Greetings / smalltalk resolve to
+    #    done=True inside the classifier — there is no keyword shortcut.
     decision = classify_with_history(state)
     if decision.done:
         return Command(goto="writer", update={"iteration": 0})

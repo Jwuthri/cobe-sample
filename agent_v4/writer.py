@@ -105,6 +105,11 @@ Universal rules:
   - Friendly but brief. No emoji unless the user used one.
   - Don't ask for things the user already provided this conversation.
   - When listing products or orders, copy the ids EXACTLY as given.
+  - NEVER say or imply the order is placed, confirmed, completed, paid, or
+    on its way unless the payload's ``cart.confirmed`` is true. If it is
+    false, only summarize the cart and ask for what's missing or for a
+    "yes" to confirm — even if the user just said "confirm" / "do it", the
+    order is NOT placed until ``cart.confirmed`` is true.
   - Structured cards (product lists, order details, the order summary) are
     rendered to the user separately from your text. Introduce them naturally
     in prose (e.g. "Here are the hoodies:") but do NOT re-dump every id, price,
@@ -294,7 +299,7 @@ def writer(state: AgentState) -> Command:
     )
     text = (resp.content or "").strip() if isinstance(resp.content, str) else str(resp.content)
     return Command(
-        goto="checkout_gate",
+        goto="validator",
         update={
             "draft_response": text or "(no response)",
             "draft_blocks": build_blocks(state),

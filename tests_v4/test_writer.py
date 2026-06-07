@@ -119,7 +119,7 @@ def test_checkout_payload_surfaces_actionable_blockers():
 
 
 # ----- end-to-end writer node -----
-def test_writer_calls_chatopenai_and_routes_to_gate():
+def test_writer_calls_chatopenai_and_routes_to_validator():
     svc = CartService()
     svc.add_item("P-2")
     svc.set_customer("Julien", "Doe")
@@ -149,7 +149,7 @@ def test_writer_calls_chatopenai_and_routes_to_gate():
         cmd = writer(s)
 
     assert isinstance(cmd, Command)
-    assert cmd.goto == "checkout_gate"
+    assert cmd.goto == "validator"
     assert "shipping address" in cmd.update["draft_response"]
 
 

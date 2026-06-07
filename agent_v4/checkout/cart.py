@@ -11,9 +11,9 @@ Three principles:
    quoted for. Any mutation to those inputs makes the quote stale.
 
 3. **Blockers gate confirmation.** ``Cart.blockers()`` is the
-   *invariant safety net* — even if the model hallucinates a
-   confirmation, the outer checkout_gate refuses it as long as
-   ``blockers()`` returns a non-empty list.
+   *invariant safety net*: ``confirm_checkout`` refuses to place the order
+   while ``blockers()`` returns a non-empty list, so ``cart.confirmed``
+   (not the model's prose) is the source of truth the writer reports.
 """
 
 from __future__ import annotations

@@ -16,7 +16,6 @@ from agent_v4.step_result import StepResult
 from agent_v4.supervisor import (
     MAX_ITERATIONS,
     SupervisorDecision,
-    _is_likely_smalltalk,
     supervisor,
 )
 from langchain_core.messages import HumanMessage
@@ -64,27 +63,14 @@ def test_classifier_picks_a_leaf_when_not_done():
     assert cmd.update["iteration"] == 1
 
 
-def test_smalltalk_short_circuits_to_writer_without_classifier_call():
+def test_smalltalk_routes_to_writer_via_classifier_done():
+    # No keyword shortcut anymore: a greeting is classified like anything
+    # else, the classifier returns done=True, and we route to the writer.
     s = _state(messages=[HumanMessage(content="hello")])
     with patch("agent_v4.supervisor.classify_with_history") as classifier:
-        classifier.side_effect = AssertionError("classifier must not run on smalltalk")
+        classifier.return_value = SupervisorDecision(done=True, reason="greeting")
         cmd = supervisor(s)
     assert cmd.goto == "writer"
-    assert cmd.update["iteration"] == 0
-
-
-def test_smalltalk_keyword_detection_is_conservative():
-    assert _is_likely_smalltalk("hello")
-    assert _is_likely_smalltalk("Hi there!")
-    assert _is_likely_smalltalk("thanks")
-    assert _is_likely_smalltalk("ok cool")
-    assert not _is_likely_smalltalk("buy P-1")
-    assert not _is_likely_smalltalk("i want a hat")
-    assert not _is_likely_smalltalk("where is my order ORD-7")
-    assert not _is_likely_smalltalk("")
-    assert not _is_likely_smalltalk(
-        "hello, i'd like to know if you ship black hoodies to san francisco"
-    )
 
 
 def test_single_intent_asks_routes_to_writer_when_classifier_says_done():
