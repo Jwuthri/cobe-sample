@@ -219,7 +219,14 @@ ORDER_STATUS_CONFIG = AgentConfig(
 # =============================================================================
 # Shared wrapper helpers (ported from v2 graph.py)
 # =============================================================================
-_PRODUCT_REC_HISTORY_TURNS = 8
+# How many recent messages the *stateless* leaves (product_rec, order_status)
+# see. The supervisor sees the FULL history (that's what fixes mis-routing), but
+# the leaves only need recent context to resolve pronouns ("the green one",
+# "them") — sending the whole transcript into every tool-loop call just inflates
+# prompts (and, with human think-time between turns, the prompt cache has
+# expired so that extra history is reprocessed uncached every turn). 16 messages
+# ≈ 8 turns is plenty for reference resolution.
+_SUBAGENT_HISTORY_MSGS = 16
 
 # Matches lines produced by catalog_tools.search_products / get_product:
 #   "P-2: Black Hoodie — $49.99 [apparel, hoodie, black]"
@@ -414,15 +421,19 @@ def make_product_rec_wrapper(agent: Any) -> Callable[[AgentState], Command]:
         ctx = _runtime_context(state)
         before = {i.product_id: i.quantity for i in state.cart.items}
 
-        # Pass recent conversation history so the subagent can resolve
-        # pronouns like "them" / "those" to products it just presented.
-        history = list(state.messages[-_PRODUCT_REC_HISTORY_TURNS:])
+        # Pass recent conversation so the subagent can resolve pronouns
+        # ("them" / "those" / "the cheaper one"). A bounded window (not the
+        # whole transcript) keeps the prompt small — references are always
+        # recent, and a smaller prompt is cheaper when the cross-turn cache
+        # has expired.
+        history = list(state.messages[-_SUBAGENT_HISTORY_MSGS:])
         if not history:
             history = [HumanMessage(content=state.last_user_message())]
         # Give the agent the current cart so it can EDIT it (resolve "the
         # hoodie" -> a product id, remove, change quantity) without searching
-        # the catalog. Without this it tends to treat "remove the hoodie" as
-        # a search.
+        # the catalog. APPEND it (don't prepend) so the stable history stays a
+        # cacheable prefix — a volatile cart note at the FRONT would change the
+        # prefix every turn and defeat OpenAI prompt caching.
         if state.cart.items:
             cart_note = (
                 "Current cart: "
@@ -430,7 +441,7 @@ def make_product_rec_wrapper(agent: Any) -> Callable[[AgentState], Command]:
                 + ". To edit it, use remove_item / set_quantity — do NOT search "
                 "the catalog to remove or change an item already in the cart."
             )
-            history = [SystemMessage(content=cart_note), *history]
+            history = [*history, SystemMessage(content=cart_note)]
 
         result = _stream_subagent(agent, {"messages": history}, context=ctx)
 
@@ -505,9 +516,15 @@ def make_product_rec_wrapper(agent: Any) -> Callable[[AgentState], Command]:
 def make_order_status_wrapper(agent: Any) -> Callable[[AgentState], Command]:
     def order_status_wrapper(state: AgentState) -> Command:
         ctx = _runtime_context(state)
+        # Recent conversation so follow-ups like "where's that one I asked
+        # about?" resolve to an order id from a nearby turn. Bounded window —
+        # the whole transcript isn't needed and just inflates the prompt.
+        history = list(state.messages[-_SUBAGENT_HISTORY_MSGS:]) or [
+            HumanMessage(content=state.last_user_message())
+        ]
         result = _stream_subagent(
             agent,
-            {"messages": [HumanMessage(content=state.last_user_message())]},
+            {"messages": history},
             context=ctx,
         )
         order_details = _extract_order_from_messages(result["messages"])

@@ -32,7 +32,6 @@ if TYPE_CHECKING:
 
 
 MAX_ITERATIONS = 4
-HISTORY_TURNS = 8
 
 
 class SupervisorDecision(BaseModel):
@@ -156,9 +155,13 @@ def _coerce_next_sop(value: str | None) -> str | None:
 
 
 def classify_with_history(state: "AgentState") -> SupervisorDecision:
-    history = state.messages[-HISTORY_TURNS:]
+    # Pass the FULL conversation, not a sliding window — when the window is
+    # short, the classifier forgets earlier context (e.g. that the user is
+    # mid-checkout and a follow-up like "94110" is the zip they were asked
+    # for, not a fresh serviceability question) and reroutes to the wrong
+    # leaf.
     user_payload = (
-        f"Recent conversation:\n{_format_history(history)}\n\n"
+        f"Conversation so far:\n{_format_history(state.messages)}\n\n"
         f"Cart step: {state.cart.step.value}\n"
         f"Step results this turn:\n{_format_step_results(state.step_results)}\n\n"
         "Decide done + next_sop."

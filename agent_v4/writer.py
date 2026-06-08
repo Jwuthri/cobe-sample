@@ -37,6 +37,7 @@ from agent_v4.output_schemas import (
     ProductRecoBlock,
 )
 from agent_v4.state import AgentState
+from agent_v4.supervisor import _format_history
 from agent_v4.tools.orders_db import get_order
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
@@ -44,13 +45,25 @@ from langgraph.types import Command
 
 WriterMode = Literal["smalltalk", "checkout", "info"]
 
+# Recent transcript turns the writer sees for continuity. Its payload is fully
+# volatile (never cached), so this is bounded to keep the per-turn cost flat
+# instead of growing with conversation length.
+WRITER_HISTORY_MSGS = 8
+
 
 WRITER_SYSTEM = """\
 You are the customer-facing assistant in a multi-agent shopping
 system. Other agents may have done work this turn; your job is to
 compose ONE clear, concise message back to the user.
 
-The input payload tells you which **mode** to use. Honor it strictly:
+The payload includes ``recent_conversation`` — the last few USER / ASSISTANT
+turns, for continuity (so you don't re-ask for something just provided and can
+refer back naturally, e.g. "the hoodie you asked about"). The cart and
+``step_results`` are the source of truth for facts the user already gave
+(name, address, items) — rely on those, not just the transcript. The
+``user_message`` field is the LATEST user turn you are replying to.
+
+The input payload also tells you which **mode** to use. Honor it strictly:
 
   - mode = "smalltalk"
       The user said something conversational, off-topic, or just hi.
@@ -193,6 +206,12 @@ def _build_writer_payload(state: AgentState) -> tuple[str, WriterMode]:
     payload: dict = {
         "mode": mode,
         "user_message": state.last_user_message(),
+        # Only the RECENT turns — the writer composes from step_results + cart
+        # (the real source of truth), so it needs just enough transcript for
+        # conversational continuity. The writer call never hits the prompt
+        # cache (its payload is fully volatile), so a bounded window here is a
+        # direct latency/cost win versus dumping the whole transcript.
+        "recent_conversation": _format_history(state.messages[-WRITER_HISTORY_MSGS:]),
         "step_results": [r.model_dump(mode="json") for r in state.step_results],
     }
     if mode == "checkout":

@@ -112,10 +112,44 @@ export function CartPanel({ snapshot }: { snapshot: AgentSnapshot | null }) {
         <Row label="serviceable">
           {c.serviceable === true ? (
             <span className="text-emerald-300">
-              yes <Dim>({c.serviceable_options.join(', ')})</Dim>
+              yes{' '}
+              <Dim>
+                (
+                {c.serviceable_options.map((opt, i) => (
+                  <span key={opt}>
+                    {i > 0 && ', '}
+                    <span
+                      className={
+                        opt === c.delivery_option
+                          ? 'text-cyan-300 font-medium'
+                          : undefined
+                      }
+                    >
+                      {opt}
+                    </span>
+                  </span>
+                ))}
+                )
+              </Dim>
             </span>
           ) : c.serviceable === false ? (
             <span className="text-rose-300">no</span>
+          ) : (
+            <Dim>—</Dim>
+          )}
+        </Row>
+        <Row label="delivery">
+          {c.delivery_option ? (
+            <span className="inline-flex items-center gap-1.5 rounded-full bg-cyan-500/15 px-2 py-0.5 text-[12px] font-medium text-cyan-300 ring-1 ring-cyan-400/30">
+              <span className="inline-block size-1.5 rounded-full bg-current" />
+              {c.delivery_option}
+              {c.shipping && (
+                <Dim>
+                  {' '}
+                  · ${c.shipping.cost} · {c.shipping.eta_hours}h
+                </Dim>
+              )}
+            </span>
           ) : (
             <Dim>—</Dim>
           )}
