@@ -109,7 +109,7 @@ export interface AgentSnapshot {
 
 // ---- SSE events emitted by the server ----
 export type ServerEvent =
-  | { type: 'user'; content: string }
+  | { type: 'user'; content: string; turn?: number }
   | { type: 'state'; snapshot: AgentSnapshot }
   | { type: 'router'; target: string; iteration: number }
   | { type: 'agent'; node: string }
@@ -123,6 +123,19 @@ export type ServerEvent =
   // agent_v4_1 streaming additions (backward-safe; older servers never emit these):
   | { type: 'token'; content: string }
   | { type: 'guardrail'; stage: string; rule: string; action: string }
+  // deep-trace frames: the exact payloads moving between orchestrator / sub-agents / writer
+  | {
+      type: 'trace';
+      phase:
+        | 'orchestrator_input'
+        | 'subagent_input'
+        | 'subagent_output'
+        | 'context'
+        | 'writer_payload';
+      agent: string;
+      title: string;
+      data: Record<string, unknown>;
+    }
   | { type: 'bot'; content: string; blocks?: Block[] }
   | { type: 'end' }
   | { type: 'error'; content: string };
@@ -144,7 +157,14 @@ export interface LogEntry {
     | 'GATE'
     | 'VALIDATOR'
     | 'BOT'
+    | 'TRACE'
     | 'ERROR';
   body: string;
   payload?: Record<string, unknown>;
+  // TRACE-only presentation metadata
+  phase?: string;
+  agent?: string;
+  title?: string;
+  // USER-only: the turn number this entry starts (drives the turn divider)
+  turn?: number;
 }

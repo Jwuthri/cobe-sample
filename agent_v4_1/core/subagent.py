@@ -31,6 +31,7 @@ from langgraph.config import get_stream_writer
 from agent_v4_1.core.config import AgentConfig
 from agent_v4_1.core.context import TurnContext, add_message_usage
 from agent_v4_1.core.step_result import StepResult
+from agent_v4_1.core.trace import emit_trace, render_messages
 
 
 # ---- plug-in callable signatures (documentation; structural, not enforced) ----
@@ -106,12 +107,28 @@ def stream_subagent(agent: Any, input_state: dict, *, context: Any = None) -> di
     return agent.invoke(input_state, context=context)
 
 
+def _config_get(config: AgentConfig | dict, key: str, default: Any = None) -> Any:
+    if isinstance(config, dict):
+        return config.get(key, default)
+    return getattr(config, key, default)
+
+
+def _tool_names(config: AgentConfig | dict) -> list[str]:
+    names: list[str] = []
+    for spec in _config_get(config, "tools", []) or []:
+        name = spec.get("name") if isinstance(spec, dict) else getattr(spec, "name", None)
+        if name:
+            names.append(name)
+    return names
+
+
 def make_subagent_tool(spec: SubagentSpec, agent: Any):
     """Wrap a compiled sub-agent as an orchestrator tool, per ``spec``."""
 
     @tool(spec.name, description=spec.description)
     def _call(query: str, runtime: ToolRuntime[TurnContext] = None) -> str:
         ctx = runtime.context
+        debug = bool(getattr(ctx, "debug", False))
         before = spec.snapshot(ctx) if spec.snapshot else None
 
         history = clean_transcript((getattr(runtime, "state", None) or {}).get("messages"))
@@ -122,13 +139,53 @@ def make_subagent_tool(spec: SubagentSpec, agent: Any):
         else:
             input_state = {"messages": [*history, HumanMessage(content=query)]}
 
+        if debug:  # what the orchestrator sends INTO this sub-agent
+            raw_input_msgs = input_state.get("messages", [])
+            conversation_seen = render_messages(raw_input_msgs)
+            # tag the injected query: it's a 'human' message to the sub-agent, but
+            # it's really the ORCHESTRATOR's instruction — not a real user turn.
+            for rendered, raw in zip(conversation_seen, raw_input_msgs):
+                if getattr(raw, "type", None) == "human" and getattr(raw, "content", None) == query:
+                    rendered["note"] = "orchestrator's instruction (the tool `query`) — not a user turn"
+            emit_trace(
+                "subagent_input",
+                spec.name,
+                f"orchestrator → {spec.name}",
+                {
+                    "query": query,
+                    "system_prompt": _config_get(spec.config, "system_prompt", ""),
+                    "tools": _tool_names(spec.config),
+                    "history_window": spec.history_window,
+                    "conversation_seen": conversation_seen,
+                },
+            )
+
         result = stream_subagent(agent, input_state, context=ctx)
         add_message_usage(ctx.usage, result.get("messages", []))
 
         sr = spec.extract(ctx, result.get("messages", []), before)
         ctx.step_results.append(sr)
+        summary = spec.summarize(sr, ctx) if spec.summarize else sr.summary
 
-        return spec.summarize(sr, ctx) if spec.summarize else sr.summary
+        if debug:  # what the sub-agent hands BACK + the mutated runtime context
+            emit_trace(
+                "subagent_output",
+                spec.name,
+                f"{spec.name} → orchestrator",
+                {
+                    "returned_to_orchestrator": summary,
+                    "step_result": sr.model_dump(mode="json"),
+                    "raw_messages": render_messages(result.get("messages", [])),
+                },
+            )
+            emit_trace(
+                "context",
+                spec.name,
+                f"runtime context after {spec.name}",
+                ctx.debug_view() if hasattr(ctx, "debug_view") else {},
+            )
+
+        return summary
 
     return _call
 

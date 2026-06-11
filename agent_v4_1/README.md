@@ -67,6 +67,41 @@ user → state
 The orchestrator is streamed with `stream_mode=["updates","custom"]` (so sub-agent
 and judge tokens can never leak); the writer with `stream_mode="messages"`.
 
+## Deep-trace debugging (`{type:"trace"}`)
+
+The events above tell you *that* a sub-agent ran and *what* it summarized. With
+`ShoppingSession(debug=True)` (the default) the engine also emits a backward-safe
+`{type:"trace", phase, agent, title, data}` frame for the layer below — the exact
+payloads moving between the actors:
+
+| phase | emitted by | `data` answers |
+|---|---|---|
+| `orchestrator_input` | session | what the orchestrator sees of the whole conversation + its system prompt + the delegate sub-agents + the initial runtime context |
+| `subagent_input` | sub-agent tool | what the orchestrator sends *into* a sub-agent: its prompt, tools, the bounded conversation window it actually receives, and the `query` |
+| `subagent_output` | sub-agent tool | what the sub-agent hands *back*: its raw messages, the distilled `StepResult`, and the terse string the orchestrator LLM actually reads |
+| `context` | sub-agent tool | the `TurnContext` after that sub-agent mutated it (step_results, usage, cart) — watch it evolve call by call |
+| `writer_payload` | session | the exact grounded JSON the writer composes its reply from + the writer system prompt + mode |
+
+Session-level frames are `yield`ed straight; in-graph frames (the sub-agent ones,
+which run *inside* the orchestrator graph) ride the custom stream via
+`core/trace.py::emit_trace` and are lifted back out by `events.classify_custom`.
+Everything is pre-trimmed (`_MAX_FIELD_CHARS`) and JSON-safe. The frontend renders
+each frame as a collapsible JSON tree under a **TRACE** row; a `trace` toggle in
+the Events header hides them. Set `debug=False` to drop the whole layer (zero
+frames, no overhead) — the core turn behavior is identical either way.
+
+Conversation arrays (`conversation_seen` / `raw_messages`) render with **role
+chips** (human / ai / system / tool). Note a sub-agent's input typically shows
+*two* `human` messages: the carried-over user turn(s) **and** the orchestrator's
+`query` — in the agent-as-tool topology the orchestrator delegates by speaking to
+the sub-agent in the `human` role (the sub-agent is a fresh `create_agent` with no
+notion of an "orchestrator"). The `subagent_input` frame tags that message
+(`note: "orchestrator's instruction…"`) so it's not mistaken for a real user turn.
+
+**Turn delimiter:** each turn increments `ShoppingSession.turn`, carried on the
+`{type:"user", …, turn}` event; the Events panel draws a "Turn N" divider before
+each user row so successive turns don't blur together.
+
 ## The config contract
 
 ```python

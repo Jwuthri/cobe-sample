@@ -36,7 +36,8 @@ Next.js rewrites `/api/*` → `http://localhost:8001/api/*` (see
 | `app/globals.css` | Tailwind 4 + theme tokens + scrollbar polish. |
 | `components/Header.tsx` | Top bar: session id, busy indicator, "New session" button. |
 | `components/CartPanel.tsx` | The live state view. Step indicator, customer, address, items, totals, blockers. |
-| `components/EventStream.tsx` | Color-coded log of every event. Auto-scrolls. |
+| `components/EventStream.tsx` | Color-coded log of every event. Auto-scrolls. Renders `TRACE` frames as collapsible panels + a header toggle to hide them. |
+| `components/JsonView.tsx` | Recursive collapsible JSON tree used by the trace panels (auto-opens near the top, `+N more` on long strings). |
 | `components/ChatPanel.tsx` | Bubble view of the conversation (alternate tab). |
 | `components/ChatInput.tsx` | Textarea + send button. Enter sends, Shift+Enter newline. |
 | `lib/types.ts` | TypeScript shapes matching the FastAPI SSE payload. |
@@ -50,7 +51,8 @@ Next.js rewrites `/api/*` → `http://localhost:8001/api/*` (see
    ↓
 streamTurn(sessionId, msg, onEvent)
    ↓ POST /api/turn/<sid> → SSE
-   ├─ {type:"user", content}     → optimistic chat bubble
+   ├─ {type:"user", content, turn} → optimistic chat bubble; `turn` draws a
+   │                                 "Turn N" divider in the Events panel
    ├─ {type:"state", snapshot}   → CartPanel re-renders
    ├─ {type:"router", target}    → ROUTER log entry
    ├─ {type:"agent", node}       → AGENT log entry
@@ -58,6 +60,10 @@ streamTurn(sessionId, msg, onEvent)
    ├─ {type:"tool_start", ...}   → TOOL log entry
    ├─ {type:"tool_end", ...}     → RESULT log entry
    ├─ {type:"step", ...}         → STEP log entry
+   ├─ {type:"trace", phase, …}   → collapsible TRACE panel (agent_v4_1 only:
+   │                                the exact payloads between orchestrator /
+   │                                sub-agents / writer; toggle in Events header)
+   ├─ {type:"token", content}    → streams into the pending bot bubble (v4_1)
    ├─ {type:"writer", draft}     → pending bot bubble
    ├─ {type:"bot", content}      → final bot bubble
    └─ {type:"end"}               → unfreeze input

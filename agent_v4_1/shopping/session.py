@@ -19,6 +19,7 @@ gate the stream — the grounding happened at construction. See the README.
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any, AsyncGenerator
@@ -26,13 +27,19 @@ from typing import Any, AsyncGenerator
 from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, HumanMessage
 
 from agent_v4_1.core.guardrails import CompiledInputRule, run_input_guardrails
-from agent_v4_1.shopping.agents import BLOCK_BY_SOP
+from agent_v4_1.core.trace import render_messages, trace_event
+from agent_v4_1.shopping.agents import BLOCK_BY_SOP, ORCHESTRATOR_AGENT, SUBAGENTS
 from agent_v4_1.shopping.blocks import build_blocks
 from agent_v4_1.shopping.context import ShoppingContext
 from agent_v4_1.shopping.domain import CartService
 from agent_v4_1.shopping.events import classify_custom, is_subagent_tool_end, step_event
 from agent_v4_1.shopping.platform import build_orchestrator, build_writer
+from agent_v4_1.shopping.prompts import WRITER_SYSTEM
 from agent_v4_1.shopping.writer_payload import build_writer_payload
+
+# How many transcript turns to show in the orchestrator_input trace (the
+# orchestrator itself sees the full history; this only bounds the debug view).
+_TRACE_HISTORY = 24
 
 _EMPTY_WRITER_FALLBACK = "Sorry, I couldn't produce a response. Could you rephrase that?"
 
@@ -75,6 +82,7 @@ class ShoppingSession:
     messages: list[BaseMessage] = field(default_factory=list)
     cart_service: CartService = field(default_factory=CartService)
     skills_loaded: list[str] = field(default_factory=list)
+    turn: int = 0  # incremented each run_turn_stream — delimits turns in the UI
 
     # Injected for tests; built from the platform otherwise.
     orchestrator: Any = None
@@ -82,6 +90,8 @@ class ShoppingSession:
     input_rules: list[CompiledInputRule] = field(default_factory=list)
     # If the writer has output-side guardrails, that turn buffers (no token stream).
     writer_buffered: bool = False
+    # Emit deep-trace events (exact payloads between orchestrator/sub-agents/writer).
+    debug: bool = True
 
     def __post_init__(self) -> None:
         if self.orchestrator is None:
@@ -154,7 +164,8 @@ class ShoppingSession:
 
     # ----- the streaming turn -----
     async def run_turn_stream(self, user_text: str) -> AsyncGenerator[dict, None]:
-        yield {"type": "user", "content": user_text}
+        self.turn += 1
+        yield {"type": "user", "content": user_text, "turn": self.turn}
         yield {"type": "state", "snapshot": self.snapshot()}
 
         # 1. input guardrails (pre-flight, before any model call)
@@ -175,7 +186,23 @@ class ShoppingSession:
             session_id=self.session_id,
             cart_service=self.cart_service,
             skills_loaded=list(self.skills_loaded),
+            debug=self.debug,
         )
+
+        # trace: what the orchestrator sees of the whole conversation + its prompt
+        if self.debug:
+            yield trace_event(
+                "orchestrator_input",
+                "orchestrator",
+                "user turn → orchestrator",
+                {
+                    "system_prompt": ORCHESTRATOR_AGENT.get("system_prompt", ""),
+                    "delegates": [s.name for s in SUBAGENTS],
+                    "messages_total": len(self.messages),
+                    "conversation_seen": render_messages(self.messages[-_TRACE_HISTORY:]),
+                    "context": ctx.debug_view(),
+                },
+            )
 
         # 2. orchestrator phase — live routing / tool / step events
         emitted = 0
@@ -205,6 +232,23 @@ class ShoppingSession:
         payload_json, _mode = build_writer_payload(
             self.messages, ctx.step_results, self.cart_service.cart
         )
+
+        # trace: the exact grounded payload the writer composes its reply from
+        if self.debug:
+            try:
+                parsed_payload = json.loads(payload_json)
+            except json.JSONDecodeError:
+                parsed_payload = {"raw": payload_json}
+            yield trace_event(
+                "writer_payload",
+                "writer",
+                f"writer input (mode={_mode})",
+                {
+                    "system_prompt": WRITER_SYSTEM,
+                    "mode": _mode,
+                    "payload": parsed_payload,
+                },
+            )
 
         text = ""
         try:

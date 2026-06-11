@@ -54,6 +54,23 @@ class TurnContext:
     step_results: list[StepResult] = field(default_factory=list)
     skills_loaded: list[str] = field(default_factory=list)
     usage: dict[str, int] = field(default_factory=zero_usage)
+    # When True, sub-agent tools emit deep-trace events on the custom stream.
+    debug: bool = False
+
+    def debug_view(self) -> dict[str, Any]:
+        """A JSON-safe snapshot of the mutable runtime state (for the trace UI).
+
+        Tenants override to add domain handles (see
+        :meth:`agent_v4_1.shopping.context.ShoppingContext.debug_view`, which
+        appends a compact cart view).
+        """
+        return {
+            "user_id": self.user_id,
+            "session_id": self.session_id,
+            "skills_loaded": list(self.skills_loaded),
+            "usage": dict(self.usage),
+            "step_results": [r.model_dump(mode="json") for r in self.step_results],
+        }
 
 
 __all__ = ["TurnContext", "add_message_usage", "zero_usage"]

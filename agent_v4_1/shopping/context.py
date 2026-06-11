@@ -12,6 +12,7 @@ bind to this class directly.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
 
 from agent_v4_1.core.context import TurnContext
 from agent_v4_1.shopping.domain import CartService
@@ -20,6 +21,21 @@ from agent_v4_1.shopping.domain import CartService
 @dataclass
 class ShoppingContext(TurnContext):
     cart_service: CartService = field(default_factory=CartService)
+
+    def debug_view(self) -> dict[str, Any]:
+        view = super().debug_view()
+        cart = self.cart_service.cart
+        view["cart"] = {
+            "step": cart.step.value,
+            "items": [
+                {"id": i.product_id, "name": i.name, "qty": i.quantity, "unit_price": str(i.unit_price)}
+                for i in cart.items
+            ],
+            "subtotal": str(cart.subtotal),
+            "confirmed": cart.confirmed,
+            "blockers": [b.code for b in cart.blockers()],
+        }
+        return view
 
 
 __all__ = ["ShoppingContext"]

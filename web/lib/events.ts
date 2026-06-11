@@ -19,7 +19,7 @@ function ts() {
 export function logEntriesFor(ev: ServerEvent): LogEntry[] {
   switch (ev.type) {
     case 'user':
-      return [{ id: id(), ts: ts(), kind: 'USER', body: ev.content }];
+      return [{ id: id(), ts: ts(), kind: 'USER', body: ev.content, turn: ev.turn }];
     case 'router':
       return [
         {
@@ -65,6 +65,19 @@ export function logEntriesFor(ev: ServerEvent): LogEntry[] {
       return [{ id: id(), ts: ts(), kind: 'VALIDATOR', body: ev.errors.join(', ') }];
     case 'bot':
       return [{ id: id(), ts: ts(), kind: 'BOT', body: ev.content }];
+    case 'trace':
+      return [
+        {
+          id: id(),
+          ts: ts(),
+          kind: 'TRACE',
+          body: `${ev.agent} · ${ev.title}`,
+          payload: ev.data,
+          phase: ev.phase,
+          agent: ev.agent,
+          title: ev.title,
+        },
+      ];
     case 'error':
       return [{ id: id(), ts: ts(), kind: 'ERROR', body: ev.content }];
     // 'token' streams into the pending-bot bubble (handled in page.tsx), no log row.
@@ -74,6 +87,15 @@ export function logEntriesFor(ev: ServerEvent): LogEntry[] {
       return [];
   }
 }
+
+// Per-phase accent (left border) for TRACE rows — mirrors the actor each frame is about.
+export const TRACE_PHASE_ACCENT: Record<string, string> = {
+  orchestrator_input: 'border-blue-400/70',
+  subagent_input: 'border-violet-400/70',
+  subagent_output: 'border-emerald-400/70',
+  context: 'border-amber-400/70',
+  writer_payload: 'border-teal-400/70',
+};
 
 export const KIND_STYLES: Record<LogEntry['kind'], { bg: string; fg: string; label: string }> = {
   USER: { bg: 'bg-sky-500/15', fg: 'text-sky-300', label: 'USER' },
@@ -87,5 +109,6 @@ export const KIND_STYLES: Record<LogEntry['kind'], { bg: string; fg: string; lab
   GATE: { bg: 'bg-red-500/15', fg: 'text-red-300', label: 'GATE' },
   VALIDATOR: { bg: 'bg-yellow-500/15', fg: 'text-yellow-300', label: 'VALIDATOR' },
   BOT: { bg: 'bg-cyan-500/15', fg: 'text-cyan-200', label: 'BOT' },
+  TRACE: { bg: 'bg-indigo-500/15', fg: 'text-indigo-300', label: 'TRACE' },
   ERROR: { bg: 'bg-rose-600/20', fg: 'text-rose-300', label: 'ERROR' },
 };

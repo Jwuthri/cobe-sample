@@ -637,3 +637,30 @@ uv run pytest tests_v4_1 -q                          # 52 tests, no real LLM cal
 
 The web client gained two backward-safe SSE events (`token`, `guardrail`) — older
 servers never emit them and the client ignores unknown types, so v4/v5 still work.
+
+## `agent_agno_v4_1/` — the v4.1 assistant rebuilt on Agno (separate package)
+
+> A faithful port of `agent_v4_1` onto **[Agno](https://docs.agno.com) 2.6** —
+> the LangGraph orchestration swapped for Agno's `Team` + `Agent` primitives,
+> keeping every behavioral property. Full writeup: `agent_agno_v4_1/README.md`.
+
+The framework-agnostic core (`domain`, the typed `blocks`, `prompts`,
+`StepResult`, the pure checkout helpers) is **reused from `agent_v4_1`**, not
+recopied; only the orchestration layer is rewritten on Agno.
+
+| Concern | agent_agno_v4_1 |
+|---|---|
+| Router | `Team(mode=coordinate)` — leader delegates to three member `Agent`s (product_rec / checkout / order_status); supports multiple members per turn for compound messages. |
+| Shared cart | a live `CartService` rides Agno `dependencies` (by reference); tools read `run_context.dependencies["ctx"]`, exactly the role of v4_1's `runtime.context`. |
+| Checkout anchor | **dynamic instructions** — a callable on the checkout member injects `checkout_anchor_text(cart)` each turn; the cart's `step` drives the flow, incl. the `awaiting_pricing` recompute path. |
+| Tool-result → facts | parsed from `member_responses[*].tools` (Agno `ToolExecution`) into the same `StepResult`s (`extractors.py`). |
+| Writer + blocks | a separate, terminal writer `Agent` streams tokens (`arun(stream=True)` → `RunContentEvent`); the team leader's own answer is discarded. Deterministic blocks are reused verbatim — the hallucination firewall. |
+
+```bash
+uvicorn server.main_agno_v4_1:app --reload --port 8001   # same web UI; reply types out live
+uv run pytest tests_agno_v4_1 -q                          # 21 tests, no real LLM calls
+```
+
+Verified end-to-end on a live model: routing, all three block types, the full
+checkout state machine, and the re-pricing path (edit a ready cart → recompute →
+confirm) all work.

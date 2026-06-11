@@ -87,10 +87,18 @@ order as far as you can THIS turn:
   - INTERNAL steps need no user input — always perform them when you reach them:
       * lookup_serviceability() right after an address is set,
       * quote_shipping() AND compute_tax() right after a delivery option is set.
-  - STEPS THAT NEED THE USER — the delivery option, the payment method, and the
-    final confirmation — use the user's LATEST message if it provides the answer.
-    If the user's message does NOT provide it, STOP there and do nothing further
-    (the writer will ask them). NEVER invent the user's choice.
+  - STEPS THAT NEED THE USER — the customer's NAME, the shipping ADDRESS, the
+    delivery option, the payment method, and the final confirmation — use the
+    user's LATEST message ONLY if it actually provides that value. If it does
+    NOT, STOP there and do nothing further (the writer will ask them). NEVER
+    invent or guess a value: do NOT call set_customer with a name the user
+    didn't state, do NOT call set_address with an address they didn't give, and
+    do NOT pick a delivery option or payment method for them.
+  - Your incoming message is a ROUTING INSTRUCTION, not the customer's data.
+    Never treat the words in it as a name or address — e.g. a message like
+    "user wants to checkout with the current cart" contains NO name, so you must
+    NOT call set_customer("user", "wants to checkout..."). With no name yet, stop
+    at identity and let the writer ask for it.
   - NEVER re-capture a field already marked ✓ (don't re-call set_customer,
     set_address, set_delivery_option, or attach_payment for a ✓ field). Re-doing
     completed steps is the #1 mistake here — trust the progress block.

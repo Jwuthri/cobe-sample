@@ -93,3 +93,30 @@ def test_custom_summarizer_overrides_summary():
     tool = make_subagent_tool(spec, _StubAgent([AIMessage(content="ran")]))
     out = tool.func(query="q", runtime=_FakeRuntime(TurnContext()))
     assert out == "[did x!]"
+
+
+def test_emits_trace_frames_when_debug(monkeypatch):
+    captured: list = []
+    monkeypatch.setattr("agent_v4_1.core.trace.get_stream_writer", lambda: captured.append)
+
+    agent = _StubAgent([AIMessage(content="ran")])
+    tool = make_subagent_tool(_spec(), agent)
+    tool.func(query="do it", runtime=_FakeRuntime(TurnContext(debug=True)))
+
+    traces = [c["trace"] for c in captured if c.get("event") == "trace"]
+    assert [t["phase"] for t in traces] == ["subagent_input", "subagent_output", "context"]
+    # input frame carries the query + the conversation the sub-agent actually sees
+    inp = traces[0]
+    assert inp["data"]["query"] == "do it"
+    assert inp["data"]["conversation_seen"][-1]["content"] == "do it"
+    # output frame carries the exact terse string handed back to the orchestrator
+    assert traces[1]["data"]["returned_to_orchestrator"] == "did x"
+    assert traces[1]["data"]["step_result"]["summary"] == "did x"
+
+
+def test_no_trace_frames_when_debug_off(monkeypatch):
+    captured: list = []
+    monkeypatch.setattr("agent_v4_1.core.trace.get_stream_writer", lambda: captured.append)
+    tool = make_subagent_tool(_spec(), _StubAgent([AIMessage(content="ran")]))
+    tool.func(query="q", runtime=_FakeRuntime(TurnContext()))  # debug defaults False
+    assert [c for c in captured if c.get("event") == "trace"] == []

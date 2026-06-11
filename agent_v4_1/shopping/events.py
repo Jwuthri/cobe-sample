@@ -21,6 +21,9 @@ def classify_custom(payload: Any) -> list[dict]:
         return []
     ev = payload.get("event")
     name = payload.get("tool")
+    if ev == "trace":  # a deep-trace frame emitted from inside a sub-agent tool
+        tr = payload.get("trace")
+        return [tr] if isinstance(tr, dict) else []
     if ev == "tool_start":
         args = {k: v for k, v in (payload.get("args") or {}).items() if k != "tool_call_id"}
         if name in _SUBAGENT_NAMES:
