@@ -32,6 +32,7 @@ from agent_v4 import ids
 from agent_v4.checkout.cart import CheckoutStep
 from agent_v4.configurable import build_agent
 from agent_v4.leaves import (
+    ALL_CHECKOUT_SKILLS,
     CHECKOUT_CONFIG,
     LEAVES_BY_NAME,
     ORDER_STATUS_CONFIG,
@@ -41,6 +42,7 @@ from agent_v4.leaves import (
     _extract_order_from_messages,
     _extract_products_from_messages,
     _extract_serviceability_from_messages,
+    checkout_anchor,
 )
 from agent_v4.memory import build_store
 from agent_v4.registry_defaults import register_platform_defaults
@@ -230,27 +232,22 @@ def call_checkout(query: str, runtime: ToolRuntime[SupervisorContext] = None) ->
     address, a delivery choice, a payment method, or "yes" to confirm).
     """
     ctx = _ctx(runtime)
-    cfg = {"configurable": {"thread_id": ctx.session_id}}
-    # Checkout keeps its own checkpointer keyed by session_id, so — exactly like
-    # v4 — we feed it only the new instruction and let the thread remember the
-    # multi-turn identity→address→delivery→payment progress + loaded skills.
-    #
-    # Because the checkpointer makes ``result["messages"]`` the ENTIRE accumulated
-    # thread (not just this turn's), we tally usage only over the messages this
-    # invocation actually added — otherwise prior turns' calls get re-counted
-    # every turn (which badly over-states cost on checkout-heavy conversations).
-    try:
-        prev = _CHECKOUT.get_state(cfg)
-        prev_n = len(prev.values.get("messages", [])) if prev and prev.values else 0
-    except Exception:
-        prev_n = 0
+    # Stateless + cart-anchored: the shared cart is the source of truth, so we
+    # inject an authoritative progress block and pre-unlock every skill, then run
+    # checkout fresh. No checkpointed thread to re-walk → it does only the next
+    # step (the old design re-executed the whole flow every turn). Because the run
+    # is fresh, ``result["messages"]`` is just this turn's, so usage is accurate.
     result = _CHECKOUT.invoke(
-        {"messages": [HumanMessage(content=query)], "skills_loaded": list(ctx.skills_loaded)},
-        config=cfg,
+        {
+            "messages": [
+                SystemMessage(content=checkout_anchor(ctx.cart_service.cart)),
+                HumanMessage(content=query),
+            ],
+            "skills_loaded": list(ALL_CHECKOUT_SKILLS),
+        },
         context=ctx,
     )
-    add_message_usage(ctx.subagent_usage, result["messages"][prev_n:])
-    ctx.skills_loaded = result.get("skills_loaded", ctx.skills_loaded)
+    add_message_usage(ctx.subagent_usage, result["messages"])
 
     cart = ctx.cart_service.cart
     asks: list[str] = []

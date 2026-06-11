@@ -59,12 +59,16 @@ export function logEntriesFor(ev: ServerEvent): LogEntry[] {
       return ev.rejected
         ? [{ id: id(), ts: ts(), kind: 'GATE', body: `rejected: ${ev.errors.join('; ')}` }]
         : [];
+    case 'guardrail':
+      return [{ id: id(), ts: ts(), kind: 'GATE', body: `${ev.rule}: ${ev.action} (${ev.stage})` }];
     case 'validator':
       return [{ id: id(), ts: ts(), kind: 'VALIDATOR', body: ev.errors.join(', ') }];
     case 'bot':
       return [{ id: id(), ts: ts(), kind: 'BOT', body: ev.content }];
     case 'error':
       return [{ id: id(), ts: ts(), kind: 'ERROR', body: ev.content }];
+    // 'token' streams into the pending-bot bubble (handled in page.tsx), no log row.
+    case 'token':
     case 'end':
     case 'state':
       return [];

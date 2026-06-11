@@ -25,7 +25,4 @@ class StepResult(BaseModel):
     asks: list[str] = Field(default_factory=list)
     next_sop: str | None = None
     cart_diff: dict | None = None
-    # Structured data the writer should render verbatim — e.g.
-    # ``{"products": [{"id": "P-1", "name": "...", "price": "..."}]}``
-    # or ``{"order": {"id": "ORD-7", "status": "shipped"}}``.
     details: dict | None = None

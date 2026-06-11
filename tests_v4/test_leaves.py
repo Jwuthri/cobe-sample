@@ -60,9 +60,12 @@ def test_order_status_config_tools():
     assert _tool_names(ORDER_STATUS_CONFIG) == {"get_order_status", "list_recent_orders"}
 
 
-def test_only_checkout_needs_a_checkpointer():
+def test_no_leaf_needs_a_checkpointer():
+    # Checkout used to keep a checkpointed thread; it's now stateless and
+    # re-anchors on the cart each turn (see checkout_anchor), so no leaf needs a
+    # checkpointer. The cart itself is carried in AgentState / the shared context.
     by_name = {s.name: s for s in LEAVES}
-    assert by_name[ids.CHECKOUT].needs_checkpointer is True
+    assert by_name[ids.CHECKOUT].needs_checkpointer is False
     assert by_name[ids.PRODUCT_REC].needs_checkpointer is False
     assert by_name[ids.ORDER_STATUS].needs_checkpointer is False
     # All leaves get the long-term memory store.

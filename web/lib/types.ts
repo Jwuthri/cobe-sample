@@ -120,6 +120,9 @@ export type ServerEvent =
   | { type: 'writer'; draft: string; blocks?: Block[] }
   | { type: 'gate'; rejected: boolean; errors: string[] }
   | { type: 'validator'; errors: string[] }
+  // agent_v4_1 streaming additions (backward-safe; older servers never emit these):
+  | { type: 'token'; content: string }
+  | { type: 'guardrail'; stage: string; rule: string; action: string }
   | { type: 'bot'; content: string; blocks?: Block[] }
   | { type: 'end' }
   | { type: 'error'; content: string };

@@ -611,3 +611,29 @@ or many blocks ("show hoodies and where's my order" → a product block **and** 
 order block); a plain FAQ/greeting carries none. Blocks ride on
 `AIMessage.additional_kwargs` → the SSE `bot` event + `/api/state` snapshot →
 the web `ChatPanel` renders them as cards (`web/components/blocks.tsx`).
+
+## `agent_v4_1/` — clean config-driven sub-agents, streaming-first (separate package)
+
+> A cleaner rebuild of `agent_v4`'s declarative idea on the `agent_v5`
+> agent-as-tool topology, with **true token streaming**. Self-contained package
+> (no imports from the churning `agent_v4`). Full writeup: `agent_v4_1/README.md`.
+
+Two things motivated it: (1) `agent_v4`'s `configurable.py` accreted; (2) its
+`supervisor → leaves → writer → validator → emit` topology **cannot stream** — the
+reply only exists after full generation + validation. `agent_v4_1` fixes both:
+
+| Concern | agent_v4_1 |
+|---|---|
+| Config contract | `agent_v4_1/core/config.py` — `AgentConfig` (pydantic, `extra="forbid"`) matching the `EXAMPLE_AGENT_CONFIG` shape; `provider_model` strings via `init_chat_model`; discriminated tool/skill unions; `pii`/`blocklist`/`llm_judge` guardrails. |
+| Orchestrator + writer | both `create_agent`. The orchestrator (temp 0) routes to sub-agent tools and emits `DONE`; the writer (temp 0.3, no tools) composes from verified step results + cart. The A/B-winning router topology from v5. |
+| Sub-agents as tools | `agent_v4_1/core/subagent.py` — ONE generic `make_subagent_tool` + a `SubagentSpec` per agent, replacing v5's three copy-pasted wrappers. |
+| Streaming | `agent_v4_1/shopping/session.py::run_turn_stream` — input guardrails gate the turn start; the writer is the terminal model call, so its tokens stream straight to the client (`{type:"token"}`). No validator on the token path. |
+| Blocks | `agent_v4_1/shopping/blocks.py` — deterministic, ids/prices verbatim (the hallucination firewall that makes streaming safe). |
+
+```bash
+uvicorn server.main_v4_1:app --reload --port 8001   # same web UI; reply types out live
+uv run pytest tests_v4_1 -q                          # 52 tests, no real LLM calls
+```
+
+The web client gained two backward-safe SSE events (`token`, `guardrail`) — older
+servers never emit them and the client ignores unknown types, so v4/v5 still work.

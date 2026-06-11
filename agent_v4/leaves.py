@@ -50,43 +50,46 @@ from langgraph.types import Command
 # System prompts (verbatim from v2 sops/*; the *definition* is now data)
 # =============================================================================
 CHECKOUT_SYSTEM_PROMPT = """\
-You are the checkout assistant. You guide the user through placing an order.
+You are the checkout assistant. You move ONE order forward.
 
-The checkout flow has FIVE sub-skills, loaded in order:
-  1. collect_identity         (capture first/last name)
-  2. collect_address          (capture shipping address)
-  3. lookup_serviceability    (verify we ship there + which options)
-  4. collect_delivery         (pick a delivery option, quote shipping/tax)
-  5. collect_payment          (capture payment method)
+Every turn you are given a "Checkout progress" block — the authoritative state of
+the order (the cart persists every captured field across turns). Advance the
+order as far as you can THIS turn:
 
-Always call ``load_skill(name)`` BEFORE you call any tool that skill
-unlocks. The available-skills block in the system prompt shows what's
-already loaded.
+  - Start from the first field that is not yet ✓ and go in order.
+  - INTERNAL steps need no user input — always perform them when you reach them:
+      * lookup_serviceability() right after an address is set,
+      * quote_shipping() AND compute_tax() right after a delivery option is set.
+  - STEPS THAT NEED THE USER — the delivery option, the payment method, and the
+    final confirmation — use the user's LATEST message if it provides the answer.
+    If the user's message does NOT provide it, STOP there and do nothing further
+    (the writer will ask them). NEVER invent the user's choice.
+  - NEVER re-capture a field already marked ✓ (don't re-call set_customer,
+    set_address, set_delivery_option, or attach_payment for a ✓ field). Re-doing
+    completed steps is the #1 mistake here — trust the progress block.
 
-You can call ``get_cart_summary()`` any time to see the current cart
-state and any blockers.
+All checkout tools are already unlocked — call them directly (no load_skill).
+Step → tool cheat-sheet:
+  - identity:        set_customer(first_name, last_name, email?)
+  - address:         set_address(street, city, zip_code, state?, country?)
+  - serviceability:  lookup_serviceability()
+  - delivery:        set_delivery_option(option) THEN quote_shipping() THEN compute_tax()
+  - payment:         attach_payment(method, card_token?)   (card needs a token)
+Call get_cart_summary() only if you genuinely need to double-check something.
 
-Items are already in the cart from a previous step (e.g., handed off
-from product recommendations). You do NOT have an add-item tool — never
-try to add products. Use get_cart_summary() to inspect the cart if you
-need to, then proceed to the next missing piece of the checkout flow.
+Items are already in the cart from product selection — you have no add-item tool;
+never try to add products.
 
 ## Confirmation rule (read carefully)
 
-NEVER call ``confirm_checkout`` automatically when the cart becomes
-ready_to_confirm. Instead:
-  1. Call ``get_cart_summary()`` so the user can see the order.
-  2. Stop — let the writer present the summary and ask the user to
-     confirm.
-  3. ONLY call ``confirm_checkout`` on a SUBSEQUENT turn, when the
-     user's most recent message is an explicit approval like "yes",
-     "y", "confirm", "place the order", "go ahead", "do it".
-  4. If the user pushes back ("wait", "no", "actually change…"),
-     DO NOT call confirm_checkout — handle their request instead.
+NEVER call ``confirm_checkout`` just because the cart is ready. Only call it when
+the user's LATEST message is an explicit approval — "yes", "y", "confirm", "place
+the order", "go ahead", "do it". If the cart is ready but the user hasn't said
+yes, do NOTHING and stop — the writer will present the summary and ask. If the
+user pushes back ("wait", "no", "actually change…"), handle that instead.
 
-You no longer speak directly to the user — the writer agent produces
-the final reply. Just do your work via tool calls and stop when
-you've made progress; the writer will summarize.
+You don't speak to the user directly — the writer composes the reply. Do your
+work via tool calls and stop.
 """
 
 PRODUCT_REC_PROMPT = """\
@@ -351,6 +354,76 @@ def _asks_for_step(step_value: str, cart) -> list[str]:
     return []
 
 
+# All checkout sub-skills, pre-unlocked every turn. The checkout subagent is now
+# stateless + cart-anchored (see ``checkout_anchor``), so the old "load_skill in
+# order" chaining — which made the model re-walk the whole flow each turn — is
+# gone. Pre-unlocking lets it call the one tool the NEXT STEP needs directly.
+ALL_CHECKOUT_SKILLS: list[str] = [s["name"] for s in CHECKOUT_SKILLS]
+
+_NEXT_STEP_HINT = {
+    "collecting_products": "items missing — this shouldn't happen mid-checkout.",
+    "collecting_identity": "identity — capture the customer's name with set_customer.",
+    "collecting_address": "address — capture the shipping address with set_address.",
+    "awaiting_serviceability": "serviceability — call lookup_serviceability().",
+    "collecting_delivery": "delivery — set_delivery_option the user chose, then quote_shipping() + compute_tax().",
+    "collecting_payment": "payment — attach_payment with the user's method (card needs a token).",
+    "awaiting_pricing": (
+        "pricing — the cart changed, so the shipping quote and tax are stale. Recompute "
+        "NOW yourself: call quote_shipping() then compute_tax(). Do NOT confirm yet — the "
+        "refreshed total must be shown so the user can approve it."
+    ),
+    "ready_to_confirm": "ready — if the user's latest message is an explicit yes/confirm, call confirm_checkout(); otherwise do nothing.",
+    "confirmed": "order already placed — do nothing.",
+}
+
+
+def checkout_anchor(cart) -> str:
+    """Deterministic 'what's done / what's next' block injected each checkout turn.
+
+    The cart is the source of truth, so we render its state explicitly instead of
+    making the model rediscover it from a growing message thread (which caused it
+    to re-execute completed steps). ``cart.step`` drives the single NEXT STEP.
+    """
+    c = cart
+
+    def mark(done: bool, value: str) -> str:
+        return f"✓ {value}".rstrip() if done else "— not provided"
+
+    name = f"{c.customer.first_name or ''} {c.customer.last_name or ''}".strip()
+    identity = mark(bool(c.customer.first_name), name)
+    address = mark(
+        c.address.is_complete(),
+        f"{c.address.street}, {c.address.city} {c.address.zip_code}",
+    )
+    if c.serviceable is True:
+        serviceability = f"✓ ships here (options: {', '.join(c.serviceable_options)})"
+    elif c.serviceable is False:
+        serviceability = "✗ NOT serviceable — ask for a different address"
+    else:
+        serviceability = "— not checked"
+    delivery = mark(bool(c.delivery_option), c.delivery_option or "")
+    payment = mark(bool(c.payment_method), c.payment_method or "")
+    if c.shipping_is_fresh() and c.tax_is_fresh():
+        pricing = f"✓ shipping {c.shipping.cost} + tax {c.tax.amount} → total {c.grand_total}"
+    elif c.delivery_option:
+        pricing = "✗ STALE — cart changed; recompute with quote_shipping() then compute_tax()"
+    else:
+        pricing = "— not computed"
+
+    return (
+        "Checkout progress (authoritative — never redo a ✓ field):\n"
+        f"  identity:       {identity}\n"
+        f"  address:        {address}\n"
+        f"  serviceability: {serviceability}\n"
+        f"  delivery:       {delivery}\n"
+        f"  payment:        {payment}\n"
+        f"  pricing:        {pricing}\n"
+        f"Resume from: {_NEXT_STEP_HINT.get(c.step.value, 'the next missing field.')}\n"
+        "Advance using the user's latest message + automatic internal steps; stop "
+        "at the first field that needs info the user hasn't given."
+    )
+
+
 # =============================================================================
 # Wrapper factories — close over the compiled leaf agent, return a graph node
 # =============================================================================
@@ -358,19 +431,22 @@ def make_checkout_wrapper(agent: Any) -> Callable[[AgentState], Command]:
     def checkout_wrapper(state: AgentState) -> Command:
         """Run the checkout subagent for one iteration; return a StepResult."""
         ctx = _runtime_context(state)
-        cfg = {"configurable": {"thread_id": state.session_id}}
         debug_log.graph(
             "checkout_wrapper",
-            f"start step={state.cart.step.value} skills={state.skills_loaded} "
-            f"msg={state.last_user_message()[:100]!r}",
+            f"start step={state.cart.step.value} msg={state.last_user_message()[:100]!r}",
         )
+        # Stateless + cart-anchored: inject the authoritative progress block and
+        # pre-unlock all skills, so the subagent does only the next step instead
+        # of re-walking the whole flow off a growing checkpointed thread.
         result = _stream_subagent(
             agent,
             {
-                "messages": [HumanMessage(content=state.last_user_message())],
-                "skills_loaded": list(state.skills_loaded),
+                "messages": [
+                    SystemMessage(content=checkout_anchor(state.cart)),
+                    HumanMessage(content=state.last_user_message()),
+                ],
+                "skills_loaded": list(ALL_CHECKOUT_SKILLS),
             },
-            config=cfg,
             context=ctx,
         )
         cart = ctx.cart_service.cart
@@ -584,7 +660,10 @@ LEAVES: list[LeafSpec] = [
         name=ids.CHECKOUT,
         config=CHECKOUT_CONFIG,
         wrapper_factory=make_checkout_wrapper,
-        needs_checkpointer=True,
+        # Stateless now: the cart (carried in AgentState / the shared context) is
+        # the source of truth, and each turn re-anchors on it via checkout_anchor.
+        # No checkpointed message thread → nothing for the model to re-walk.
+        needs_checkpointer=False,
         output_block="checkout",
         routing_help=(
             "checkout       The user is actively trying to buy: they want a cart\n"

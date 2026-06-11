@@ -1,0 +1,289 @@
+"""``ShoppingSession`` — the per-session, streaming-first turn engine.
+
+This is where the streaming story lands. A turn is:
+
+  1. input guardrails (pre-flight, before any model call) — a refusal is instant,
+     a redaction rewrites the user text before it enters the transcript;
+  2. the orchestrator routes to sub-agent tools, streamed live (router / tool /
+     step events as they happen);
+  3. the writer — the LAST model call, with nothing after it — streams its tokens
+     straight to the client (``{type:"token"}``), retried once if it emits nothing;
+  4. deterministic blocks are attached and a final ``{type:"bot"}`` carries the
+     authoritative text + blocks.
+
+Because the writer is terminal and only ever sees verified step results + cart
+(blocks are built deterministically), there is no post-generation validator to
+gate the stream — the grounding happened at construction. See the README.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from dataclasses import dataclass, field
+from decimal import Decimal
+from typing import Any, AsyncGenerator
+
+from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, HumanMessage
+
+from agent_v4_1.core.guardrails import CompiledInputRule, run_input_guardrails
+from agent_v4_1.shopping.agents import BLOCK_BY_SOP
+from agent_v4_1.shopping.blocks import build_blocks
+from agent_v4_1.shopping.context import ShoppingContext
+from agent_v4_1.shopping.domain import CartService
+from agent_v4_1.shopping.events import classify_custom, is_subagent_tool_end, step_event
+from agent_v4_1.shopping.platform import build_orchestrator, build_writer
+from agent_v4_1.shopping.writer_payload import build_writer_payload
+
+_EMPTY_WRITER_FALLBACK = "Sorry, I couldn't produce a response. Could you rephrase that?"
+
+
+def _d(value: Any) -> Any:
+    return str(value) if isinstance(value, Decimal) else value
+
+
+def _chunk_text(chunk: Any) -> str:
+    """Extract the text delta from a streamed message chunk (str or list content)."""
+    if not isinstance(chunk, AIMessageChunk):
+        return ""
+    content = chunk.content
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(
+            p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text"
+        )
+    return ""
+
+
+def _last_ai_text_from_updates(payload: dict) -> str:
+    """Pull the last AIMessage text out of an 'updates' stream payload."""
+    for update in (payload or {}).values():
+        if not isinstance(update, dict):
+            continue
+        for m in reversed(update.get("messages", []) or []):
+            if isinstance(m, AIMessage) and isinstance(m.content, str) and m.content.strip():
+                return m.content.strip()
+    return ""
+
+
+@dataclass
+class ShoppingSession:
+    """One conversation: clean transcript + live cart + the compiled agents."""
+
+    user_id: str = "demo"
+    session_id: str = "sess-v41"
+    messages: list[BaseMessage] = field(default_factory=list)
+    cart_service: CartService = field(default_factory=CartService)
+    skills_loaded: list[str] = field(default_factory=list)
+
+    # Injected for tests; built from the platform otherwise.
+    orchestrator: Any = None
+    writer: Any = None
+    input_rules: list[CompiledInputRule] = field(default_factory=list)
+    # If the writer has output-side guardrails, that turn buffers (no token stream).
+    writer_buffered: bool = False
+
+    def __post_init__(self) -> None:
+        if self.orchestrator is None:
+            self.orchestrator = build_orchestrator()
+        if self.writer is None:
+            self.writer = build_writer()
+
+    # ----- snapshot (the frontend's AgentSnapshot) -----
+    def snapshot(self) -> dict[str, Any]:
+        cart = self.cart_service.cart
+        return {
+            "user_id": self.user_id,
+            "session_id": self.session_id,
+            "active_sop": None,
+            "skills_loaded": list(self.skills_loaded),
+            "cart": {
+                "step": cart.step.value,
+                "cart_id": cart.cart_id,
+                "items": [
+                    {
+                        "id": i.product_id,
+                        "name": i.name,
+                        "qty": i.quantity,
+                        "unit_price": _d(i.unit_price),
+                        "line_total": _d(i.line_total),
+                        "tags": list(i.tags),
+                    }
+                    for i in cart.items
+                ],
+                "customer": cart.customer.model_dump(),
+                "address": cart.address.model_dump(),
+                "serviceable": cart.serviceable,
+                "serviceable_options": list(cart.serviceable_options),
+                "delivery_option": cart.delivery_option,
+                "shipping": (
+                    {"cost": _d(cart.shipping.cost), "eta_hours": cart.shipping.eta_hours}
+                    if cart.shipping_is_fresh()
+                    else None
+                ),
+                "tax": (
+                    {"amount": _d(cart.tax.amount), "rate": _d(cart.tax.rate)}
+                    if cart.tax_is_fresh()
+                    else None
+                ),
+                "promo": (
+                    {"code": cart.promo.code, "discount": _d(cart.promo.discount)}
+                    if cart.promo
+                    else None
+                ),
+                "payment_method": cart.payment_method,
+                "card_token_set": bool(cart.card_token),
+                "subtotal": _d(cart.subtotal),
+                "grand_total": _d(cart.grand_total) if cart.grand_total is not None else None,
+                "blockers": [{"code": b.code, "message": b.message} for b in cart.blockers()],
+                "ready_to_confirm": cart.ready_to_confirm(),
+                "confirmed": cart.confirmed,
+                "receipt_id": cart.receipt_id,
+            },
+            "messages": [
+                {
+                    "role": getattr(m, "type", "?"),
+                    "content": str(m.content),
+                    "blocks": (getattr(m, "additional_kwargs", {}) or {}).get("blocks", []),
+                }
+                for m in self.messages
+            ],
+            "iteration": 0,
+            "done": True,
+        }
+
+    # ----- the streaming turn -----
+    async def run_turn_stream(self, user_text: str) -> AsyncGenerator[dict, None]:
+        yield {"type": "user", "content": user_text}
+        yield {"type": "state", "snapshot": self.snapshot()}
+
+        # 1. input guardrails (pre-flight, before any model call)
+        outcome = run_input_guardrails(self.input_rules, user_text)
+        for hit in outcome.triggered:
+            yield {"type": "guardrail", "stage": "input", "rule": hit.type, "action": hit.action}
+        if not outcome.allowed:
+            self.messages.append(HumanMessage(content=user_text))
+            self.messages.append(AIMessage(content=outcome.refusal or ""))
+            yield {"type": "bot", "content": outcome.refusal or "", "blocks": []}
+            yield {"type": "state", "snapshot": self.snapshot()}
+            yield {"type": "end"}
+            return
+
+        self.messages.append(HumanMessage(content=outcome.text))
+        ctx = ShoppingContext(
+            user_id=self.user_id,
+            session_id=self.session_id,
+            cart_service=self.cart_service,
+            skills_loaded=list(self.skills_loaded),
+        )
+
+        # 2. orchestrator phase — live routing / tool / step events
+        emitted = 0
+        try:
+            async for mode, payload in self.orchestrator.astream(
+                {"messages": self.messages}, context=ctx, stream_mode=["updates", "custom"]
+            ):
+                if mode == "custom":
+                    for ev in classify_custom(payload):
+                        yield ev
+                    if is_subagent_tool_end(payload):
+                        while emitted < len(ctx.step_results):
+                            yield step_event(ctx.step_results[emitted])
+                            emitted += 1
+            while emitted < len(ctx.step_results):  # drain any tail
+                yield step_event(ctx.step_results[emitted])
+                emitted += 1
+        except Exception as e:  # noqa: BLE001
+            yield {"type": "error", "content": str(e)}
+            yield {"type": "end"}
+            return
+
+        yield {"type": "state", "snapshot": self.snapshot()}
+
+        # 3. writer phase — the terminal model call, streamed token-by-token
+        yield {"type": "router", "target": "writer", "iteration": 0}
+        payload_json, _mode = build_writer_payload(
+            self.messages, ctx.step_results, self.cart_service.cart
+        )
+
+        text = ""
+        try:
+            if self.writer_buffered:
+                text = await self._invoke_writer(payload_json)
+            else:
+                async for ev in self._stream_writer(payload_json):
+                    if ev["type"] == "token":
+                        yield ev
+                    elif ev["type"] == "_final":
+                        text = ev["content"]
+        except Exception as e:  # noqa: BLE001
+            yield {"type": "error", "content": str(e)}
+            yield {"type": "end"}
+            return
+
+        if not text:
+            text = _EMPTY_WRITER_FALLBACK
+
+        blocks = build_blocks(ctx.step_results, self.cart_service.cart, BLOCK_BY_SOP)
+        self.skills_loaded = ctx.skills_loaded
+        self.messages.append(
+            AIMessage(content=text, additional_kwargs={"blocks": blocks} if blocks else {})
+        )
+
+        yield {"type": "writer", "draft": text, "blocks": blocks}
+        yield {"type": "bot", "content": text, "blocks": blocks}
+        yield {"type": "state", "snapshot": self.snapshot()}
+        yield {"type": "end"}
+
+    async def _stream_writer(self, payload_json: str) -> AsyncGenerator[dict, None]:
+        """Stream writer tokens, retrying once if the first attempt is empty.
+
+        Empty-retry is stream-safe: an empty stream sent zero tokens, so the
+        retry is invisible to the client.
+        """
+        for _attempt in (1, 2):
+            parts: list[str] = []
+            async for chunk, meta in self.writer.astream(
+                {"messages": [HumanMessage(content=payload_json)]}, stream_mode="messages"
+            ):
+                if not isinstance(chunk, AIMessageChunk):
+                    continue
+                if meta.get("langgraph_node") != "model":
+                    continue
+                t = _chunk_text(chunk)
+                if t:
+                    parts.append(t)
+                    yield {"type": "token", "content": t}
+            text = "".join(parts).strip()
+            if text:
+                yield {"type": "_final", "content": text}
+                return
+        yield {"type": "_final", "content": ""}
+
+    async def _invoke_writer(self, payload_json: str) -> str:
+        """Buffered writer (used when output-side guardrails are configured)."""
+        result = await self.writer.ainvoke({"messages": [HumanMessage(content=payload_json)]})
+        for m in reversed(result.get("messages", [])):
+            if isinstance(m, AIMessage) and isinstance(m.content, str) and m.content.strip():
+                return m.content.strip()
+        return ""
+
+    # ----- sync convenience (tests / non-streaming callers) -----
+    def run_turn(self, user_text: str) -> dict[str, Any]:
+        """Run a turn to completion, returning a summary of the collected events."""
+
+        async def _collect() -> list[dict]:
+            return [ev async for ev in self.run_turn_stream(user_text)]
+
+        events = asyncio.run(_collect())
+        tokens = [e["content"] for e in events if e["type"] == "token"]
+        bot = next((e for e in reversed(events) if e["type"] == "bot"), None)
+        return {
+            "events": events,
+            "message": bot["content"] if bot else "",
+            "blocks": bot["blocks"] if bot else [],
+            "tokens": tokens,
+        }
+
+
+__all__ = ["ShoppingSession"]

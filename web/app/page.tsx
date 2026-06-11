@@ -54,6 +54,8 @@ export default function Page() {
             setEvents((prev) => [...prev, entry]);
           }
           if (ev.type === 'state') setSnapshot(ev.snapshot);
+          // Stream writer tokens into the pending bubble as they arrive (v4_1).
+          if (ev.type === 'token') setPendingBot((p) => (p ?? '') + ev.content);
           if (ev.type === 'writer') setPendingBot(ev.draft);
           if (ev.type === 'bot') setPendingBot(null);
         });

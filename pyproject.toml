@@ -13,6 +13,7 @@ dependencies = [
     "langchain-core>=1.4",
     "langchain-openai>=1.2",
     "langgraph-checkpoint>=3.0",
+    "deepagents>=0.6.8",
     "pydantic>=2.13",
     "openai>=2.37",
     "rich>=14.2",
@@ -20,6 +21,7 @@ dependencies = [
     "agno>=2.6.9",
     "langsmith[openai-agents]>=0.8.5",
     "ipython>=9.14.0",
+    "httpx>=0.27",
 ]
 
 [project.optional-dependencies]
@@ -34,7 +36,7 @@ server = [
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["agent_v2*", "agent_v3*", "agent_v4*"]
+include = ["agent_v2*", "agent_v3*", "agent_v4*", "agent_v4_1*", "agent_deepagent_v4*"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

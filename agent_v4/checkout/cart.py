@@ -119,6 +119,7 @@ class CheckoutStep(str, Enum):
     AWAITING_SERVICEABILITY = "awaiting_serviceability"
     COLLECTING_DELIVERY = "collecting_delivery"
     COLLECTING_PAYMENT = "collecting_payment"
+    AWAITING_PRICING = "awaiting_pricing"
     READY_TO_CONFIRM = "ready_to_confirm"
     CONFIRMED = "confirmed"
 
@@ -196,6 +197,11 @@ class Cart(BaseModel):
             return CheckoutStep.COLLECTING_PAYMENT
         if self.confirmed:
             return CheckoutStep.CONFIRMED
+        # Everything is collected, but a cart edit (e.g. set_quantity / remove_item)
+        # may have invalidated the shipping quote and tax. We CANNOT confirm with a
+        # stale total, so this is its own step: recompute pricing before ready.
+        if not (self.shipping_is_fresh() and self.tax_is_fresh()):
+            return CheckoutStep.AWAITING_PRICING
         return CheckoutStep.READY_TO_CONFIRM
 
     # ----- freshness -----
