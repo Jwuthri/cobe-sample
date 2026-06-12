@@ -115,7 +115,7 @@ def build_writer_payload(
         "mode": mode,
         "user_message": _last_user_message(messages),
         "recent_conversation": _format_history(messages[-WRITER_HISTORY_MSGS:]),
-        "step_results": [r.model_dump(mode="json") for r in step_results],
+        "step_results": [r.model_dump(mode="json", exclude={"recall"}) for r in step_results],
     }
     if mode == "checkout":
         payload["cart"] = _cart_summary_for_checkout(cart)

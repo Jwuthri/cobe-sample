@@ -37,5 +37,13 @@ class ShoppingContext(TurnContext):
         }
         return view
 
+    def routing_context(self) -> dict[str, str]:
+        """The live cart, as a block the orchestrator can resolve references against."""
+        cart = self.cart_service.cart
+        if not cart.items:
+            return {}
+        items = "; ".join(f"{i.product_id} {i.name} x{i.quantity}" for i in cart.items)
+        return {"cart": f"Current cart: {items}"}
+
 
 __all__ = ["ShoppingContext"]

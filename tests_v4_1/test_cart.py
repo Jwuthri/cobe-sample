@@ -4,12 +4,28 @@ from __future__ import annotations
 
 from decimal import Decimal
 
+import pytest
+
 from agent_v4_1.shopping.domain import CartService
+from agent_v4_1.shopping.domain.cart_service import CartError
 
 
 def test_deterministic_ids():
     cs = CartService()
     assert cs.cart.cart_id == "CART-1000"
+
+
+def test_set_customer_rejects_confabulated_names():
+    cs = CartService()
+    # field labels / addresses the LLM might mistakenly pass as a name
+    for first, last in [("Shipping", "address"), ("shipping", "ADDRESS"), ("1717", "webst"), ("Delivery", "method")]:
+        with pytest.raises(CartError):
+            cs.set_customer(first, last)
+    assert cs.cart.customer.first_name is None  # nothing was written
+
+    # real names still go through (incl. hyphen/apostrophe)
+    assert "Customer set" in cs.set_customer("Jean-Luc", "O'Brien")
+    assert cs.cart.customer.first_name == "Jean-Luc"
 
 
 def test_add_and_subtotal():

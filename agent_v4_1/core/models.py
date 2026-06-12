@@ -14,7 +14,7 @@ from langchain.chat_models import init_chat_model
 
 from agent_v4_1.core.config import ModelConfig
 
-_DEFAULT_PROVIDER_MODEL = "openai:gpt-4.1-mini"
+_DEFAULT_PROVIDER_MODEL = "openai:gpt-5.4-mini"
 
 
 def default_provider_model() -> str:

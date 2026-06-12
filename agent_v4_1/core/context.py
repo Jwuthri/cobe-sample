@@ -72,5 +72,16 @@ class TurnContext:
             "step_results": [r.model_dump(mode="json") for r in self.step_results],
         }
 
+    def routing_context(self) -> dict[str, str]:
+        """Live structured state the orchestrator should see to resolve references.
+
+        Returns ``{label: llm_ready_text}``. The base carries no domain state — a
+        tenant overrides this to surface, e.g., the current cart (see
+        :class:`agent_v4_1.shopping.context.ShoppingContext`). The session merges
+        these *live* blocks with the *persisted* per-step ``recall`` snippets to
+        build the orchestrator's routing memo — all domain-agnostic.
+        """
+        return {}
+
 
 __all__ = ["TurnContext", "add_message_usage", "zero_usage"]

@@ -38,6 +38,31 @@ class CartError(Exception):
     """Raised by service mutators when a requested mutation is illegal."""
 
 
+# Words that appear in checkout prompts / routing labels but are never a person's
+# name. The LLM sometimes confabulates identity from these (e.g. it relabels an
+# address message "Shipping address: …" and sets first/last = "Shipping"/"address").
+_NON_NAME_TOKENS = frozenset(
+    {
+        "shipping", "address", "delivery", "payment", "checkout", "name", "first",
+        "last", "cart", "order", "customer", "billing", "email", "phone", "zip",
+        "zipcode", "city", "street", "state", "country", "method", "none", "unknown",
+    }
+)
+
+
+def _looks_like_name(value: str) -> bool:
+    """A cheap, deterministic 'is this plausibly a name?' gate (not validation)."""
+    v = (value or "").strip()
+    if not v:
+        return False
+    if any(ch.isdigit() for ch in v):  # names have no digits; addresses do
+        return False
+    tokens = v.lower().split()
+    if tokens and all(t in _NON_NAME_TOKENS for t in tokens):  # all label words → not a name
+        return False
+    return True
+
+
 class CartService:
     def __init__(self, cart: Cart | None = None) -> None:
         self.cart = cart or Cart()
@@ -85,6 +110,13 @@ class CartService:
 
     # ----- identity -----
     def set_customer(self, first_name: str, last_name: str, email: str | None = None) -> str:
+        if not _looks_like_name(first_name) or not _looks_like_name(last_name):
+            raise CartError(
+                f"'{first_name} {last_name}' is not a valid customer name (it looks "
+                "like a field label or address, not a person). Do NOT guess a name — "
+                "leave identity empty and ask the user for their actual first and last "
+                "name."
+            )
         self.cart.customer.first_name = first_name.strip()
         self.cart.customer.last_name = last_name.strip()
         if email is not None:

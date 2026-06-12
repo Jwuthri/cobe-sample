@@ -39,13 +39,21 @@ def _registry_tools(tools) -> list[dict]:
 
 
 # =============================================================================
+# MODEL — the one knob. Every agent below declares it explicitly in its `model`
+# block (no hidden env fallback). Format is "provider:model"; override per agent
+# by writing a literal in that agent's block instead of MODEL.
+# =============================================================================
+MODEL = "openai:gpt-5.4-mini"
+
+
+# =============================================================================
 # sub-agent configs
 # =============================================================================
 PRODUCT_REC_AGENT = {
     "name": "product_rec",
     "description": "Browse + cart management: search, lookup, serviceability, add/remove/qty/view.",
     "system_prompt": PRODUCT_REC_PROMPT,
-    "model": {"temperature": 0.0},
+    "model": {"provider_model": MODEL, "temperature": 0.0},
     "tools": _registry_tools(PRODUCT_REC_TOOLS),
     "middleware": [{"name": "log_tool_calls", "params": {"log_prefix": "product_rec"}}],
 }
@@ -54,7 +62,7 @@ CHECKOUT_AGENT = {
     "name": "checkout",
     "description": "Drive an in-progress purchase from identity to payment to confirmation.",
     "system_prompt": CHECKOUT_PROMPT,
-    "model": {"temperature": 0.0},
+    "model": {"provider_model": MODEL, "temperature": 0.0},
     "tools": _registry_tools(CHECKOUT_TOOLS),
     "middleware": [
         {"name": "cart_anchor", "params": {}},
@@ -66,7 +74,7 @@ ORDER_STATUS_AGENT = {
     "name": "order_status",
     "description": "Look up a past order's status / tracking.",
     "system_prompt": ORDER_STATUS_PROMPT,
-    "model": {"temperature": 0.0},
+    "model": {"provider_model": MODEL, "temperature": 0.0},
     "tools": _registry_tools(ORDER_STATUS_TOOLS),
     "middleware": [{"name": "log_tool_calls", "params": {"log_prefix": "order_status"}}],
 }
@@ -79,7 +87,7 @@ WRITER_AGENT = {
     "name": "writer",
     "description": "Compose the single user-facing reply from verified step results + cart.",
     "system_prompt": WRITER_SYSTEM,
-    "model": {"temperature": 0.3},
+    "model": {"provider_model": MODEL, "temperature": 0.3},
     "tools": [],
 }
 
@@ -87,7 +95,7 @@ ORCHESTRATOR_AGENT = {
     "name": "orchestrator",
     "description": "Route the user's message to its sub-agents, then emit DONE.",
     "system_prompt": ROUTER_PROMPT,
-    "model": {"temperature": 0.0},
+    "model": {"provider_model": MODEL, "temperature": 0.0},
     # NB: no `tools` here. The orchestrator's delegates are the sub-agents in
     # SUBAGENTS, wired in by build_orchestrator() via build_agent(delegates=...).
     # Sub-agents are not registry tools — they carry Python extractors and live

@@ -9,13 +9,21 @@ plug-in callables.
 The skeleton (identical for every sub-agent):
   1. read the shared context off ``runtime.context``
   2. snapshot domain state (optional, for diffing)
-  3. build the sub-agent input from a bounded clean-transcript window + the query
+  3. build the sub-agent input from the orchestrator's self-contained ``query``
+     (+ optional deterministic state notes) — NOT the chat transcript
   4. run the sub-agent via :func:`stream_subagent` (re-pumps inner custom events
      to the orchestrator's stream — ``.invoke`` would swallow them)
   5. tally token usage, distill a ``StepResult``, append it to the context
   6. return a TERSE summary string — the only thing the orchestrator LLM reads
      (rich data rides ``StepResult.details`` → deterministic blocks; the model
      can't hallucinate ids/prices it never sees)
+
+**Context isolation.** A sub-agent does NOT see the conversation. The orchestrator
+is the sole reader of the transcript: it resolves the user's references ("the green
+one", "add it") into a concrete, self-contained ``query`` and passes only that. A
+sub-agent operates on ``(query + shared structured state)`` — the cart is its
+memory, not the chat. This keeps responsibility for interpretation in one place,
+cuts tokens + prompt-injection surface, and makes each sub-agent a clean function.
 """
 
 from __future__ import annotations
@@ -24,7 +32,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Protocol
 
 from langchain.tools import ToolRuntime
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
+from langchain_core.messages import BaseMessage, HumanMessage
 from langchain_core.tools import tool
 from langgraph.config import get_stream_writer
 
@@ -40,7 +48,7 @@ class Extractor(Protocol):
 
 
 class InputBuilder(Protocol):
-    def __call__(self, ctx: Any, history: list[BaseMessage], query: str) -> dict: ...
+    def __call__(self, ctx: Any, query: str) -> dict: ...
 
 
 class Snapshot(Protocol):
@@ -59,22 +67,10 @@ class SubagentSpec:
     description: str  # tool description = the routing surface
     config: AgentConfig | dict  # the declarative agent definition
     extract: Extractor  # REQUIRED: result messages -> StepResult
-    build_input: InputBuilder | None = None  # default: history + Human(query)
+    build_input: InputBuilder | None = None  # default: just Human(query); NO history
     snapshot: Snapshot | None = None  # pre-run snapshot passed to extract as `before`
     summarize: Summarizer | None = None  # default: sr.summary
-    history_window: int = 16
     block: str | None = None  # writer block kind (consumed by shopping/blocks.py)
-
-
-def clean_transcript(messages: list[BaseMessage] | None) -> list[BaseMessage]:
-    """Keep only the human/assistant story (drop tool-call noise + empty AIs)."""
-    out: list[BaseMessage] = []
-    for m in messages or []:
-        if isinstance(m, HumanMessage):
-            out.append(m)
-        elif isinstance(m, AIMessage) and isinstance(m.content, str) and m.content.strip():
-            out.append(m)
-    return out
 
 
 def stream_subagent(agent: Any, input_state: dict, *, context: Any = None) -> dict:
@@ -131,22 +127,21 @@ def make_subagent_tool(spec: SubagentSpec, agent: Any):
         debug = bool(getattr(ctx, "debug", False))
         before = spec.snapshot(ctx) if spec.snapshot else None
 
-        history = clean_transcript((getattr(runtime, "state", None) or {}).get("messages"))
-        history = history[-spec.history_window :]
-
+        # Context-isolated: the input is the orchestrator's self-contained query
+        # (+ any deterministic state notes the builder adds) — never the transcript.
         if spec.build_input is not None:
-            input_state = spec.build_input(ctx, history, query)
+            input_state = spec.build_input(ctx, query)
         else:
-            input_state = {"messages": [*history, HumanMessage(content=query)]}
+            input_state = {"messages": [HumanMessage(content=query)]}
 
         if debug:  # what the orchestrator sends INTO this sub-agent
             raw_input_msgs = input_state.get("messages", [])
-            conversation_seen = render_messages(raw_input_msgs)
+            input_seen = render_messages(raw_input_msgs)
             # tag the injected query: it's a 'human' message to the sub-agent, but
             # it's really the ORCHESTRATOR's instruction — not a real user turn.
-            for rendered, raw in zip(conversation_seen, raw_input_msgs):
+            for rendered, raw in zip(input_seen, raw_input_msgs):
                 if getattr(raw, "type", None) == "human" and getattr(raw, "content", None) == query:
-                    rendered["note"] = "orchestrator's instruction (the tool `query`) — not a user turn"
+                    rendered["note"] = "orchestrator's instruction (the tool `query`)"
             emit_trace(
                 "subagent_input",
                 spec.name,
@@ -155,8 +150,8 @@ def make_subagent_tool(spec: SubagentSpec, agent: Any):
                     "query": query,
                     "system_prompt": _config_get(spec.config, "system_prompt", ""),
                     "tools": _tool_names(spec.config),
-                    "history_window": spec.history_window,
-                    "conversation_seen": conversation_seen,
+                    "isolated": True,  # sub-agent does NOT see the conversation
+                    "input_seen": input_seen,
                 },
             )
 
@@ -215,6 +210,5 @@ __all__ = [
     "SubagentSpec",
     "make_subagent_tool",
     "build_subagent_tools",
-    "clean_transcript",
     "stream_subagent",
 ]

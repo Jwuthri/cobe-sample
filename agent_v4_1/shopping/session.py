@@ -24,7 +24,13 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any, AsyncGenerator
 
-from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, HumanMessage
+from langchain_core.messages import (
+    AIMessage,
+    AIMessageChunk,
+    BaseMessage,
+    HumanMessage,
+    SystemMessage,
+)
 
 from agent_v4_1.core.guardrails import CompiledInputRule, run_input_guardrails
 from agent_v4_1.core.trace import render_messages, trace_event
@@ -83,6 +89,11 @@ class ShoppingSession:
     cart_service: CartService = field(default_factory=CartService)
     skills_loaded: list[str] = field(default_factory=list)
     turn: int = 0  # incremented each run_turn_stream — delimits turns in the UI
+    # Persisted per-step ``recall`` snippets (keyed by sop), carried to the
+    # orchestrator so it can resolve the user's references WITHOUT the sub-agents
+    # seeing the chat. Opaque to the session — domain code renders the content, so
+    # this stays agnostic to whether the tenant sells products, orders, docs, ….
+    routing_notes: dict[str, str] = field(default_factory=dict)
 
     # Injected for tests; built from the platform otherwise.
     orchestrator: Any = None
@@ -162,6 +173,35 @@ class ShoppingSession:
             "done": True,
         }
 
+    # ----- routing context (the orchestrator owns reference resolution) -----
+    # NOTE: domain-agnostic. The two helpers below never inspect cart/product
+    # internals — live state comes from ``ctx.routing_context()`` and per-step
+    # memory from ``StepResult.recall``. They'd hoist unchanged into a core base.
+    def _routing_memo(self, ctx: ShoppingContext) -> str | None:
+        """Assemble the orchestrator's reference-resolution block.
+
+        Sub-agents are context-isolated, so the orchestrator must resolve the
+        user's references itself. It gets two agnostic sources — never the raw
+        chat: the domain's *live* state (``ctx.routing_context()``, e.g. the cart)
+        and the *persisted* per-step recalls (``self.routing_notes``).
+        """
+        live = ctx.routing_context()
+        blocks = [text for text in live.values() if text]
+        blocks += [text for key, text in self.routing_notes.items() if key not in live and text]
+        if not blocks:
+            return None
+        return (
+            "Context for resolving the user's references (authoritative — do NOT "
+            "invent; if a reference is ambiguous, delegate to a sub-agent to look "
+            "it up):\n" + "\n".join(blocks)
+        )
+
+    def _absorb_recalls(self, ctx: ShoppingContext) -> None:
+        """Persist each step's ``recall`` snippet (keyed by sop) for future turns."""
+        for sr in ctx.step_results:
+            if sr.recall:
+                self.routing_notes[sr.sop] = sr.recall
+
     # ----- the streaming turn -----
     async def run_turn_stream(self, user_text: str) -> AsyncGenerator[dict, None]:
         self.turn += 1
@@ -189,7 +229,16 @@ class ShoppingSession:
             debug=self.debug,
         )
 
-        # trace: what the orchestrator sees of the whole conversation + its prompt
+        # The orchestrator is the SOLE reader of the conversation. It also gets a
+        # deterministic routing memo (cart + recently shown products) so it can
+        # resolve references into concrete ids before delegating — the sub-agents
+        # never see the transcript (see core/subagent.py "Context isolation").
+        memo = self._routing_memo(ctx)
+        orch_messages: list[BaseMessage] = list(self.messages)
+        if memo:
+            orch_messages.insert(len(orch_messages) - 1, SystemMessage(content=memo))
+
+        # trace: exactly what the orchestrator sees (transcript + routing memo)
         if self.debug:
             yield trace_event(
                 "orchestrator_input",
@@ -198,8 +247,9 @@ class ShoppingSession:
                 {
                     "system_prompt": ORCHESTRATOR_AGENT.get("system_prompt", ""),
                     "delegates": [s.name for s in SUBAGENTS],
+                    "routing_memo": memo,
                     "messages_total": len(self.messages),
-                    "conversation_seen": render_messages(self.messages[-_TRACE_HISTORY:]),
+                    "conversation_seen": render_messages(orch_messages[-_TRACE_HISTORY:]),
                     "context": ctx.debug_view(),
                 },
             )
@@ -208,7 +258,7 @@ class ShoppingSession:
         emitted = 0
         try:
             async for mode, payload in self.orchestrator.astream(
-                {"messages": self.messages}, context=ctx, stream_mode=["updates", "custom"]
+                {"messages": orch_messages}, context=ctx, stream_mode=["updates", "custom"]
             ):
                 if mode == "custom":
                     for ev in classify_custom(payload):
@@ -224,6 +274,10 @@ class ShoppingSession:
             yield {"type": "error", "content": str(e)}
             yield {"type": "end"}
             return
+
+        # persist this turn's recall snippets so the NEXT turn's orchestrator can
+        # resolve references without the sub-agents ever seeing the chat
+        self._absorb_recalls(ctx)
 
         yield {"type": "state", "snapshot": self.snapshot()}
 

@@ -169,3 +169,30 @@ def test_user_event_carries_incrementing_turn_number():
     t1 = next(e for e in session.run_turn("block one")["events"] if e["type"] == "user")["turn"]
     t2 = next(e for e in session.run_turn("block two")["events"] if e["type"] == "user")["turn"]
     assert (t1, t2) == (1, 2)
+
+
+def test_routing_memo_merges_live_state_and_persisted_recalls():
+    # agnostic: live state comes from ctx.routing_context(), recall from routing_notes
+    from agent_v4_1.shopping.domain import CartService
+
+    cs = CartService()
+    cs.add_item("P-2")
+    session = ShoppingSession(
+        orchestrator=object(),  # skip __post_init__ build (no real models)
+        writer=object(),
+        cart_service=cs,
+        routing_notes={"product_rec": "Recently shown products: P-4 Green Cap $14.50"},
+    )
+    memo = session._routing_memo(ShoppingContext(cart_service=cs))
+    assert memo is not None
+    assert "P-2" in memo  # live cart, via ctx.routing_context()
+    assert "P-4" in memo  # persisted per-step recall (engine never parsed it)
+
+
+def test_absorb_recalls_persists_step_recall_by_sop():
+    # the session is agnostic — it keys opaque recall text by sop, never inspecting it
+    session = ShoppingSession(orchestrator=object(), writer=object())
+    ctx = ShoppingContext()
+    ctx.step_results.append(StepResult(sop="order_status", recall="Recently looked up order: ORD-9 delivered"))
+    session._absorb_recalls(ctx)
+    assert session.routing_notes == {"order_status": "Recently looked up order: ORD-9 delivered"}

@@ -63,25 +63,25 @@ def test_snapshot_passed_to_extractor():
     assert seen["before"] == "SNAP"
 
 
-def test_default_input_windows_clean_history():
+def test_default_input_is_query_only():
+    # context-isolated: the sub-agent sees ONLY the orchestrator's query — the
+    # conversation transcript on runtime.state is deliberately NOT forwarded.
     agent = _StubAgent([AIMessage(content="ran")])
-    tool = make_subagent_tool(_spec(history_window=2), agent)
+    tool = make_subagent_tool(_spec(), agent)
     state = {
         "messages": [
             HumanMessage(content="a"),
             AIMessage(content="b"),
             HumanMessage(content="c"),
-            AIMessage(content="d"),
         ]
     }
     tool.func(query="Q", runtime=_FakeRuntime(TurnContext(), state=state))
-    contents = [m.content for m in agent.last_input["messages"]]
-    assert contents == ["c", "d", "Q"]  # last 2 history msgs + the query
+    assert [m.content for m in agent.last_input["messages"]] == ["Q"]
 
 
 def test_custom_build_input_is_used():
     agent = _StubAgent([AIMessage(content="ran")])
-    spec = _spec(build_input=lambda ctx, history, query: {"messages": [HumanMessage(content=query)]})
+    spec = _spec(build_input=lambda ctx, query: {"messages": [HumanMessage(content=query)]})
     tool = make_subagent_tool(spec, agent)
     state = {"messages": [HumanMessage(content="old"), AIMessage(content="older")]}
     tool.func(query="ONLY", runtime=_FakeRuntime(TurnContext(), state=state))
@@ -105,10 +105,11 @@ def test_emits_trace_frames_when_debug(monkeypatch):
 
     traces = [c["trace"] for c in captured if c.get("event") == "trace"]
     assert [t["phase"] for t in traces] == ["subagent_input", "subagent_output", "context"]
-    # input frame carries the query + the conversation the sub-agent actually sees
+    # input frame carries the query + the (isolated) input the sub-agent actually sees
     inp = traces[0]
     assert inp["data"]["query"] == "do it"
-    assert inp["data"]["conversation_seen"][-1]["content"] == "do it"
+    assert inp["data"]["isolated"] is True
+    assert [m["content"] for m in inp["data"]["input_seen"]] == ["do it"]  # query only
     # output frame carries the exact terse string handed back to the orchestrator
     assert traces[1]["data"]["returned_to_orchestrator"] == "did x"
     assert traces[1]["data"]["step_result"]["summary"] == "did x"

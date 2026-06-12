@@ -106,8 +106,15 @@ def set_customer(
     email: str | None = None,
     runtime: ToolRuntime[ShoppingContext] = None,
 ) -> str:
-    """Save the customer's first and last name (and optional email)."""
-    return runtime.context.cart_service.set_customer(first_name, last_name, email)
+    """Save the customer's first and last name (and optional email).
+
+    Only call this with a name the user actually stated. It rejects field labels /
+    addresses (e.g. "Shipping address") — never guess a name to fill the field.
+    """
+    try:
+        return runtime.context.cart_service.set_customer(first_name, last_name, email)
+    except CartError as e:
+        return f"error: {e}"
 
 
 @tool

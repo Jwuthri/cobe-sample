@@ -169,14 +169,15 @@ def cart_quantities(ctx) -> dict[str, int]:
     return {i.product_id: i.quantity for i in ctx.cart_service.cart.items}
 
 
-def with_cart_note(ctx, history, query) -> dict:
-    """product_rec input: recent history + a volatile cart note + the instruction.
+def with_cart_note(ctx, query) -> dict:
+    """product_rec input: a volatile cart note (structured state) + the instruction.
 
-    The cart note is a SUFFIX (right before the instruction), not a prefix — a
-    changing note at the front would break the cacheable history prefix each turn.
+    Context-isolated — NO conversation history. The orchestrator already resolved
+    any reference into the ``query``; the only ambient context the sub-agent needs
+    is the live cart, so it can edit lines without re-searching.
     """
     cart = ctx.cart_service.cart
-    messages = list(history)
+    messages = []
     if cart.items:
         note = (
             "Current cart: "
@@ -189,10 +190,26 @@ def with_cart_note(ctx, history, query) -> dict:
     return {"messages": messages}
 
 
-def checkout_input(ctx, history, query) -> dict:
+def checkout_input(ctx, query) -> dict:
     """checkout input: just the instruction — the progress anchor comes from the
     cart_anchor middleware, and the cart is the source of truth (no history needed)."""
     return {"messages": [HumanMessage(content=query)]}
+
+
+# =============================================================================
+# recall snippets — domain-rendered text the orchestrator remembers next turn to
+# resolve references. The engine carries these agnostically (StepResult.recall).
+# =============================================================================
+def _shown_products_recall(products: list[dict]) -> str:
+    listed = "; ".join(
+        f"{p['id']} {p['name']} ${p['price']}"
+        + (f" [{', '.join(p.get('tags', []))}]" if p.get("tags") else "")
+        for p in products
+    )
+    return (
+        "Recently shown products (resolve references like 'the green one', 'it', "
+        f"'the second one' to THESE exact ids): {listed}"
+    )
 
 
 # =============================================================================
@@ -255,6 +272,7 @@ def extract_product_rec(ctx, messages, before) -> StepResult:
         next_sop=next_sop,
         details=details,
         cart_diff={"items": len(cart.items)} if cart_changed else None,
+        recall=_shown_products_recall(products) if products else None,
     )
 
 
@@ -283,6 +301,8 @@ def extract_order_status(ctx, messages, before) -> StepResult:
         asks=[] if order_details else ["confirm the order id"],
         next_sop=None,
         details=order_details,
+        # a different sub-agent type contributing its own recall — same generic field
+        recall=f"Recently looked up order: {order_details['raw']}" if order_details else None,
     )
 
 

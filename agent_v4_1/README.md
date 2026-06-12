@@ -76,8 +76,8 @@ payloads moving between the actors:
 
 | phase | emitted by | `data` answers |
 |---|---|---|
-| `orchestrator_input` | session | what the orchestrator sees of the whole conversation + its system prompt + the delegate sub-agents + the initial runtime context |
-| `subagent_input` | sub-agent tool | what the orchestrator sends *into* a sub-agent: its prompt, tools, the bounded conversation window it actually receives, and the `query` |
+| `orchestrator_input` | session | what the orchestrator sees: the conversation, its system prompt, the delegate sub-agents, the `routing_memo` (cart + recently shown products), and the initial runtime context |
+| `subagent_input` | sub-agent tool | what the orchestrator sends *into* a sub-agent: its prompt, tools, `isolated: true`, and `input_seen` — the self-contained `query` (+ optional cart note), NOT the chat |
 | `subagent_output` | sub-agent tool | what the sub-agent hands *back*: its raw messages, the distilled `StepResult`, and the terse string the orchestrator LLM actually reads |
 | `context` | sub-agent tool | the `TurnContext` after that sub-agent mutated it (step_results, usage, cart) — watch it evolve call by call |
 | `writer_payload` | session | the exact grounded JSON the writer composes its reply from + the writer system prompt + mode |
@@ -90,13 +90,11 @@ each frame as a collapsible JSON tree under a **TRACE** row; a `trace` toggle in
 the Events header hides them. Set `debug=False` to drop the whole layer (zero
 frames, no overhead) — the core turn behavior is identical either way.
 
-Conversation arrays (`conversation_seen` / `raw_messages`) render with **role
-chips** (human / ai / system / tool). Note a sub-agent's input typically shows
-*two* `human` messages: the carried-over user turn(s) **and** the orchestrator's
-`query` — in the agent-as-tool topology the orchestrator delegates by speaking to
-the sub-agent in the `human` role (the sub-agent is a fresh `create_agent` with no
-notion of an "orchestrator"). The `subagent_input` frame tags that message
-(`note: "orchestrator's instruction…"`) so it's not mistaken for a real user turn.
+Message arrays (`input_seen` / `conversation_seen` / `raw_messages`) render with
+**role chips** (human / ai / system / tool). Because of context isolation (below) a
+sub-agent's `input_seen` is normally just ONE `human` message — the orchestrator's
+instruction — tagged `note: "orchestrator's instruction (the tool query)"`. Only
+the orchestrator's `conversation_seen` carries the full transcript.
 
 **Turn delimiter:** each turn increments `ShoppingSession.turn`, carried on the
 `{type:"user", …, turn}` event; the Events panel draws a "Turn N" divider before
@@ -130,6 +128,35 @@ functions: the skeleton (snapshot → build input → run → extract `StepResul
 return a terse summary) is written once; per-agent differences are small plug-in
 callables (`shopping/extractors.py`). The orchestrator LLM only ever reads the
 terse summary; rich data rides `StepResult.details` → deterministic blocks.
+
+### Context isolation — the orchestrator owns interpretation
+
+Sub-agents do **not** see the conversation. The orchestrator is the *sole* reader
+of the transcript: it resolves the user's references ("the green one", "add it",
+"make it 2") into a concrete, self-contained `query` and passes only that. A
+sub-agent operates on `(query + shared structured state)` — the **cart is its
+memory, not the chat**. `build_input(ctx, query)` may add deterministic state
+notes (product_rec's cart note; checkout's `cart_anchor` progress block) but never
+history.
+
+To resolve references without the chat, the session hands the orchestrator a
+**routing memo** (`ShoppingSession._routing_memo`) — assembled from two
+**domain-agnostic** sources, so the engine never hardcodes "products":
+
+  * **live state** — `ctx.routing_context() -> {label: text}` (a `TurnContext`
+    hook; `ShoppingContext` returns the current cart). Recomputed each turn.
+  * **persisted recalls** — `StepResult.recall`, a free-text snippet a step
+    surfaces for next turn ("Recently shown products: P-4 …"). The session keeps
+    the latest per sop in `routing_notes` and never inspects it; the *domain*
+    extractor renders the text (`shopping/extractors.py`). A future `order_status`
+    or `doc_search` sub-agent populates the same field — no engine change.
+
+So "the green one" binds to an id deterministically, in one place. Why this shape:
+one LLM owns interpretation (no split-brain where router *and* sub-agent both parse
+intent), fewer tokens, smaller prompt-injection surface, each sub-agent is a clean
+testable function — and the carry-context mechanism is generic to any tenant.
+Trade-off: the router prompt must produce good queries — the `subagent_input`
+trace is how you verify it does.
 
 ## Run
 

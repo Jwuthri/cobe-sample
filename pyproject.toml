@@ -36,7 +36,7 @@ server = [
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["agent_v2*", "agent_v3*", "agent_v4*", "agent_v4_1*", "agent_deepagent_v4*", "agent_agno_v1*"]
+include = ["agent_v2*", "agent_v3*", "agent_v4*", "agent_v4_1*", "agent_deepagent_v4*", "agent_agno_v4_1*", "agent_agno_v1*", "agno_agent_v1*", "lg_agent*", "openai_agent_v1*"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
