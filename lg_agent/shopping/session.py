@@ -181,7 +181,6 @@ class ShoppingSession:
         # persist this turn's recall snippets so the NEXT turn's orchestrator can
         # resolve references without the sub-agents ever seeing the chat
         absorb_recalls(ctx, self.routing_notes)
-        self.skills_loaded = ctx.skills_loaded  # carry loaded skills into the snapshot
         yield {"type": "state", "snapshot": self.snapshot()}
 
         # 3. writer phase — the terminal model call, streamed token-by-token
@@ -222,6 +221,7 @@ class ShoppingSession:
 
         # 4. deterministic blocks + the authoritative bot reply
         blocks = build_blocks(ctx.step_results, self.cart_service.cart, BLOCK_BY_SOP)
+        self.skills_loaded = ctx.skills_loaded
         self.messages.append(
             AIMessage(content=text, additional_kwargs={"blocks": blocks} if blocks else {})
         )

@@ -1,29 +1,33 @@
-"""The ``checkout`` sub-agent — drive one purchase from identity to confirmation.
+"""The ``checkout`` worker — drive ONE purchase from identity to confirmation.
 
-Self-contained like the other sub-agents. The distinctive piece here is
-:func:`checkout_progress`: a deterministic "what's done / what's next" block
-rendered from the cart's step. It is injected on every checkout model call by the
-``cart_anchor`` middleware (see :mod:`lg_agent.shopping.middleware`) so the agent
-never has to rediscover state from a growing thread — the cart is the truth.
+This is the heart of the assistant, and the design goal is that the model never has
+to *remember* anything: the cart is the truth. Every run, a dynamic instruction
+(:func:`checkout_progress`) injects a deterministic "what's done / what's next" block
+rendered from :pyattr:`Cart.step`. In the LangChain build this was a bespoke
+``cart_anchor`` middleware; in Pydantic AI it is just an ``@agent.instructions``
+function — re-evaluated on every run, so a mid-turn mutation updates it for free.
+
+Two more safety nets keep "confirmed" honest:
+  * there is no ``add_item`` tool here (adding is product_rec's job), so a double-add
+    is structurally impossible;
+  * ``confirm_checkout`` is gated by the cart's invariant ``blockers()`` — the model
+    cannot place an order the domain considers incomplete, no matter what it says.
 """
 
 from __future__ import annotations
 
-from langchain_core.messages import HumanMessage
+from pydantic_ai import Agent, RunContext
 
-from lg_agent.core.step import StepResult
-from lg_agent.core.subagent import SubAgent
-from lg_agent.shopping.agents.subagents.names import CHECKOUT
-from lg_agent.shopping.tools import CHECKOUT_TOOLS, registry_specs
-
-MODEL = "openai:gpt-5.4-mini"
+from pydantic_agent_v1.agents import tools
+from pydantic_agent_v1.agents.names import CHECKOUT
+from pydantic_agent_v1.runtime import MODEL_NAME, ShoppingDeps, StepResult, Worker, settings
 
 PROMPT = """\
 You are the checkout assistant. You move ONE order forward.
 
 Every turn you are given a "Checkout progress" block — the authoritative state of
-the order (the cart persists every captured field across turns). Advance the
-order as far as you can THIS turn:
+the order (the cart persists every captured field across turns). Advance the order
+as far as you can THIS turn:
 
   - CLASSIFY the user's message FIRST: is it a name, an address (has a street
     number / zip), a delivery option, a payment method, or a yes/no? Set ONLY the
@@ -38,23 +42,22 @@ order as far as you can THIS turn:
       * quote_shipping() AND compute_tax() right after a delivery option is set.
   - STEPS THAT NEED THE USER — the customer's NAME, the shipping ADDRESS, the
     delivery option, the payment method, and the final confirmation — use the
-    user's LATEST message ONLY if it actually provides that value. If it does
-    NOT, STOP there and do nothing further (the writer will ask them). NEVER
-    invent or guess a value: do NOT call set_customer with a name the user
-    didn't state, do NOT call set_address with an address they didn't give, do
-    NOT pick a delivery option or payment method for them, and NEVER invent a
-    card token — pass card_token only if the user actually gave one.
+    user's LATEST message ONLY if it actually provides that value. If it does NOT,
+    STOP there and do nothing further (the writer will ask them). NEVER invent or
+    guess a value: do NOT call set_customer with a name the user didn't state, do
+    NOT call set_address with an address they didn't give, do NOT pick a delivery
+    option or payment method for them, and NEVER invent a card token — pass
+    card_token only if the user actually gave one.
   - If the saved address is NOT serviceable and the user gives a corrected value
     (often just a new ZIP), call set_address AGAIN — reuse the street/city already
     shown in the progress block and swap in the new value.
-  - Your incoming message is a ROUTING INSTRUCTION, not the customer's data.
-    Never treat the words in it as a name or address — e.g. a message like
-    "user wants to checkout with the current cart" contains NO name, so you must
-    NOT call set_customer("user", "wants to checkout..."). With no name yet, stop
-    at identity and let the writer ask for it.
-  - NEVER re-capture a field already marked ✓ unless the user is explicitly
-    changing it. Re-doing completed steps is the #1 mistake here — trust the
-    progress block.
+  - Your incoming message is a ROUTING INSTRUCTION, not the customer's data. Never
+    treat the words in it as a name or address — e.g. a message like "user wants to
+    checkout with the current cart" contains NO name, so you must NOT call
+    set_customer("user", "wants to checkout..."). With no name yet, stop at identity
+    and let the writer ask for it.
+  - NEVER re-capture a field already marked ✓ unless the user is explicitly changing
+    it. Re-doing completed steps is the #1 mistake here — trust the progress block.
 
 Step → tool cheat-sheet:
   - identity:        set_customer(first_name, last_name, email?)
@@ -70,39 +73,58 @@ never try to add products.
 
 ## Confirmation rule (read carefully)
 
-NEVER call ``confirm_checkout`` just because the cart is ready. Only call it when
-the user's LATEST message is an explicit approval — "yes", "y", "confirm", "place
-the order", "go ahead", "do it". If the cart is ready but the user hasn't said
-yes, do NOTHING and stop — the writer will present the summary and ask. If the
-user pushes back ("wait", "no", "actually change…"), handle that instead.
+NEVER call confirm_checkout just because the cart is ready. Only call it when the
+user's LATEST message is an explicit approval — "yes", "y", "confirm", "place the
+order", "go ahead", "do it". If the cart is ready but the user hasn't said yes, do
+NOTHING and stop — the writer will present the summary and ask. If the user pushes
+back ("wait", "no", "actually change…"), handle that instead.
 
-You don't speak to the user directly — the writer composes the reply. Do your
-work via tool calls and stop.
+You don't speak to the user directly — a separate writer composes the reply. Do your
+work via tool calls, then end your turn by replying with the single word DONE (an
+internal marker the user never sees). Always produce that DONE line, even if you took
+no action this turn.
 """
 
 DESCRIPTION = (
-    "Move an order forward: capture identity, shipping address, delivery option, "
-    "and payment, then place the order ONLY on the user's explicit 'yes'. Requires "
-    "items already in the cart. Pass the user's latest checkout-relevant message as "
-    "`query` (their name, an address, a delivery choice, a payment method, or 'yes')."
+    "Move an order forward: capture identity, shipping address, delivery option, and "
+    "payment, then place the order ONLY on the user's explicit 'yes'. Requires items "
+    "already in the cart. Pass the user's latest checkout-relevant message as `query` "
+    "(their name, an address, a delivery choice, a payment method, or 'yes')."
 )
 
-CONFIG = {
-    "name": CHECKOUT,
-    "description": "Drive an in-progress purchase from identity to payment to confirmation.",
-    "system_prompt": PROMPT,
-    "model": {"provider_model": MODEL, "temperature": 0.0},
-    "tools": registry_specs(CHECKOUT_TOOLS),
-    "middleware": [
-        {"name": "cart_anchor", "params": {}},
-        {"name": "log_tool_calls", "params": {"log_prefix": CHECKOUT}},
+agent = Agent(
+    MODEL_NAME,
+    deps_type=ShoppingDeps,
+    model_settings=settings(0.0),
+    instructions=PROMPT,
+    tools=[
+        tools.remove_item,
+        tools.set_quantity,
+        tools.set_customer,
+        tools.set_address,
+        tools.lookup_serviceability,
+        tools.set_delivery_option,
+        tools.quote_shipping,
+        tools.compute_tax,
+        tools.apply_promo,
+        tools.attach_payment,
+        tools.confirm_checkout,
+        tools.get_cart_summary,
     ],
-}
+    name=CHECKOUT,
+)
 
 
-# =============================================================================
-# the deterministic "Checkout progress" block (also used by cart_anchor middleware)
-# =============================================================================
+@agent.instructions
+def _progress_anchor(ctx: RunContext[ShoppingDeps]) -> str:
+    """Inject the authoritative checkout state on every run (the cart is the truth)."""
+    return checkout_progress(ctx.deps.cart_service.cart)
+
+
+# =========================================================================== #
+# the deterministic "Checkout progress" block
+# (also consumed by the writer payload + the checkout block builder)
+# =========================================================================== #
 def asks_for_step(step_value: str, cart) -> list[str]:
     """What the user still needs to provide at the current step."""
     if step_value == "collecting_identity":
@@ -139,7 +161,7 @@ _NEXT_STEP_HINT = {
 
 
 def checkout_progress(cart) -> str:
-    """The authoritative 'what's done / what's next' block injected each turn.
+    """The authoritative 'what's done / what's next' block injected each run.
 
     The cart is the source of truth, so we render its state explicitly instead of
     making the model rediscover it from a growing thread. ``cart.step`` drives the
@@ -152,10 +174,7 @@ def checkout_progress(cart) -> str:
 
     name = f"{c.customer.first_name or ''} {c.customer.last_name or ''}".strip()
     identity = mark(bool(c.customer.first_name), name)
-    address = mark(
-        c.address.is_complete(),
-        f"{c.address.street}, {c.address.city} {c.address.zip_code}",
-    )
+    address = mark(c.address.is_complete(), f"{c.address.street}, {c.address.city} {c.address.zip_code}")
     if c.serviceable is True:
         serviceability = f"✓ ships here (options: {', '.join(c.serviceable_options)})"
     elif c.serviceable is False:
@@ -180,22 +199,16 @@ def checkout_progress(cart) -> str:
         f"  payment:        {payment}\n"
         f"  pricing:        {pricing}\n"
         f"Resume from: {_NEXT_STEP_HINT.get(c.step.value, 'the next missing field.')}\n"
-        "Advance using the user's latest message + automatic internal steps; stop "
-        "at the first field that needs info the user hasn't given."
+        "Advance using the user's latest message + automatic internal steps; stop at "
+        "the first field that needs info the user hasn't given."
     )
 
 
-# =============================================================================
+# =========================================================================== #
 # hooks
-# =============================================================================
-def build_input(ctx, query: str) -> dict:
-    """Just the instruction — the progress anchor comes from the cart_anchor
-    middleware, and the cart is the source of truth (no history needed)."""
-    return {"messages": [HumanMessage(content=query)]}
-
-
-def extract(ctx, messages, before) -> StepResult:
-    cart = ctx.cart_service.cart
+# =========================================================================== #
+def extract(deps: ShoppingDeps, messages, before) -> StepResult:
+    cart = deps.cart_service.cart
     asks: list[str] = []
     if cart.step.value.startswith("collecting_"):
         asks = asks_for_step(cart.step.value, cart)
@@ -203,27 +216,23 @@ def extract(ctx, messages, before) -> StepResult:
         asks = ["explicit yes to place the order"]
     return StepResult(
         sop=CHECKOUT,
-        summary=f"checkout subagent finished at step={cart.step.value}; items={len(cart.items)}",
+        summary=f"checkout finished at step={cart.step.value}; items={len(cart.items)}",
         asks=asks,
         next_sop=None,
-        cart_diff={"step": cart.step.value},
     )
 
 
-def summarize(sr: StepResult, ctx) -> str:
+def _summarize(sr: StepResult, deps: ShoppingDeps) -> str:
     asks_note = f" Needs from user: {', '.join(sr.asks)}." if sr.asks else ""
-    confirmed = " ORDER CONFIRMED." if ctx.cart_service.cart.confirmed else ""
+    confirmed = " ORDER CONFIRMED." if deps.cart_service.cart.confirmed else ""
     return f"{sr.summary}.{asks_note}{confirmed}"
 
 
-SUBAGENT = SubAgent(
+WORKER = Worker(
     name=CHECKOUT,
-    description=DESCRIPTION,
-    config=CONFIG,
-    build_input=build_input,
+    agent=agent,
     extract=extract,
-    summarize=summarize,
+    prompt=PROMPT,
     block="checkout",
+    summarize=_summarize,
 )
-
-__all__ = ["SUBAGENT", "CONFIG", "PROMPT", "checkout_progress", "asks_for_step"]

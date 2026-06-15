@@ -68,10 +68,6 @@ The input payload also tells you which **mode** to use. Honor it strictly:
 
 Universal rules:
   - Never invent facts. If a field is null/missing, don't reference it.
-  - The cart is the truth for what is SET. Never claim a field was changed,
-    updated, or set to a value the cart does not show — if the user asked to change
-    something but ``cart`` still shows the old value, report the value that is
-    actually there (the change didn't take), don't assert the new one.
   - Friendly but brief. No emoji unless the user used one.
   - Don't ask for things the user already provided this conversation.
   - When listing products or orders, copy the ids EXACTLY as given.

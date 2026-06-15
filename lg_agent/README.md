@@ -120,14 +120,12 @@ It resolves every reference into a self-contained `query` and passes only that t
 sub-agent. A sub-agent operates on `(query + shared cart)` — never the transcript —
 which keeps interpretation in one place and cuts tokens + prompt-injection surface.
 
-**Skills (the checkout agent).** Checkout's per-step how-to lives in skills loaded
-on demand ([checkout_skills.py](shopping/agents/subagents/checkout_skills.py)), not
-in one giant prompt. Each step's tools are *gated* behind its skill (`unlocks`), so
-the agent must `load_skill('collect_address')` before it can `set_address` — which
-keeps the prompt lean and makes every step visible in the UI as a `load_skill` call.
-The cart's `step` still drives *which* skill (the progress block names it); the
-skill provides the *how*. Other agents declare no skills, so gating is a no-op for
-them.
+**Checkout state.** The checkout agent doesn't carry a long prompt of step rules —
+each turn the `cart_anchor` middleware injects a deterministic "Checkout progress"
+block rendered from `cart.step` (what's ✓, what's next). The cart is the source of
+truth, so the agent never re-derives state from a growing thread. (Skills remain a
+platform feature — see the `AgentConfig.skills` contract — but the demo's agents
+don't use them.)
 
 ---
 

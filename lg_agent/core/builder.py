@@ -48,14 +48,7 @@ def _resolve_skills(cfg: AgentConfig) -> list[Skill]:
         if isinstance(spec, RegistrySkillSpec):
             out.append(SKILLS.get(spec.name))
         elif isinstance(spec, CustomSkillSpec):
-            out.append(
-                Skill(
-                    name=spec.name,
-                    description=spec.description,
-                    content=spec.skill,
-                    unlocks=spec.unlocks,
-                )
-            )
+            out.append(Skill(name=spec.name, description=spec.description, content=spec.skill))
     return out
 
 

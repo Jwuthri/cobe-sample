@@ -33,6 +33,10 @@ def check_serviceability(zip_code: str) -> str:
     z = (zip_code or "").strip()
     if not z:
         return "I need a zip code to check serviceability."
+    if not any(ch.isdigit() for ch in z):
+        # A city/area name, not a zip — we only look up by zip, so ask for one
+        # instead of confidently (and wrongly) reporting "not serviceable".
+        return f"I check serviceability by ZIP code. What's the ZIP for '{z}'?"
     result = lookup_zip(z)
     if result is None:
         return f"We don't currently ship to zip {z}."

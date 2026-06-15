@@ -16,7 +16,7 @@ from langchain.agents.middleware import AgentMiddleware, AgentState
 from langchain_core.messages import SystemMessage, ToolMessage
 from langchain_core.tools import InjectedToolCallId, tool
 from langgraph.types import Command
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from typing_extensions import NotRequired
 
 
@@ -24,11 +24,6 @@ class Skill(BaseModel):
     name: str
     description: str = ""
     content: str
-    # Tools this skill unlocks. A tool named by *some* skill's ``unlocks`` is hidden
-    # from the model until that skill is loaded — so loading the skill is the only
-    # way to reach its step's tools. Empty ``unlocks`` everywhere ⇒ no gating (skills
-    # are then pure instruction bundles).
-    unlocks: list[str] = Field(default_factory=list)
 
 
 def _skills_loaded_reducer(left: list[str] | None, right: list[str] | None) -> list[str]:
@@ -97,16 +92,10 @@ def render_available_block(skills: list[Skill], loaded: list[str]) -> str:
 
 
 class SkillsMiddleware(AgentMiddleware):
-    """Provide the ``load_skill`` tool, inject the available-skills block, and gate
-    tools behind their skill.
+    """Provide the ``load_skill`` tool + inject the available-skills block.
 
-    Two transient effects, applied per model call via ``wrap_model_call`` (nothing is
-    written back to state):
-
-      * prepend the "Available skills" block (with up-to-date ``(loaded)`` markers);
-      * hide any tool that some skill ``unlocks`` until that skill is loaded — so the
-        model literally cannot run a step before loading its skill. If no skill
-        declares ``unlocks``, gating is a no-op and skills are pure instructions.
+    The block is prepended to the model's messages per call via ``wrap_model_call``
+    (transient — nothing is written back to state).
     """
 
     state_schema = SkillsAgentState
@@ -115,23 +104,11 @@ class SkillsMiddleware(AgentMiddleware):
         super().__init__()
         self.skills = skills
         self.tools = [make_load_skill_tool(skills)]
-        # Tools claimed by *some* skill — these are the gated ones.
-        self._gated = {tool for s in skills for tool in s.unlocks}
 
     def _apply(self, request: Any) -> Any:
         loaded = (getattr(request, "state", None) or {}).get("skills_loaded", []) or []
         block = render_available_block(self.skills, loaded)
-        overrides: dict[str, Any] = {"messages": [SystemMessage(content=block), *request.messages]}
-        if self._gated and getattr(request, "tools", None):
-            unlocked = {tool for s in self.skills if s.name in loaded for tool in s.unlocks}
-            kept = [
-                t
-                for t in request.tools
-                if getattr(t, "name", None) not in self._gated or getattr(t, "name", None) in unlocked
-            ]
-            if len(kept) != len(request.tools):
-                overrides["tools"] = kept
-        return request.override(**overrides)
+        return request.override(messages=[SystemMessage(content=block), *request.messages])
 
     def wrap_model_call(self, request: Any, handler: Any) -> Any:
         return handler(self._apply(request))

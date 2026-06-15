@@ -141,11 +141,6 @@ def as_tool(sub: SubAgent, agent: Any):
 
         result = stream_subagent(agent, input_state, context=ctx)
         add_message_usage(ctx.usage, result.get("messages", []))
-        # Surface any skills the sub-agent loaded on the shared context so the
-        # session/snapshot (and the UI's SKILLS row) can show them.
-        for name in result.get("skills_loaded") or []:
-            if name not in ctx.skills_loaded:
-                ctx.skills_loaded.append(name)
 
         sr = sub.extract(ctx, result.get("messages", []), before)
         ctx.step_results.append(sr)

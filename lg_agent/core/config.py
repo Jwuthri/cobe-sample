@@ -124,13 +124,7 @@ class RegistrySkillSpec(BaseModel):
 
 
 class CustomSkillSpec(BaseModel):
-    """Inline a skill: a one-line ``description`` + the full ``skill`` body.
-
-    ``unlocks`` optionally names the tools this skill gates — those tools are hidden
-    from the model until the skill is loaded (see
-    :class:`lg_agent.core.skills.SkillsMiddleware`). Omit it for a pure instruction
-    bundle.
-    """
+    """Inline a skill: a one-line ``description`` + the full ``skill`` body."""
 
     model_config = _STRICT
 
@@ -138,7 +132,6 @@ class CustomSkillSpec(BaseModel):
     name: str = Field(min_length=1)
     description: str = ""
     skill: str
-    unlocks: list[str] = Field(default_factory=list)
 
 
 SkillSpec = Annotated[Union[RegistrySkillSpec, CustomSkillSpec], Field(discriminator="kind")]

@@ -60,8 +60,7 @@ def test_checkout_progress_renders():
     text = checkout.checkout_progress(cs.cart)
     assert "✓ Ada Lovelace" in text  # identity captured
     assert "address:        — not provided" in text
-    # the block names the skill the current step needs (detail loads on demand)
-    assert "load_skill('collect_address')" in text
+    assert "Resume from:" in text
 
 
 def test_checkout_progress_flags_unserviceable():
