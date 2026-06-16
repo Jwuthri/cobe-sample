@@ -1,0 +1,28 @@
+"""google_adk_agent_v1 — the agent_v4_1 shopping assistant, rebuilt from scratch on
+Google ADK (the Agent Development Kit).
+
+A multi-agent shopping assistant with a careful checkout flow and true token
+streaming. The architecture is three clean layers:
+
+  * :mod:`google_adk_agent_v1.domain`  — the store, as pure logic (the behavioral spec);
+  * :mod:`google_adk_agent_v1.runtime` — thin generic glue (deps, events, delegation);
+  * :mod:`google_adk_agent_v1.agents`  — five agents, one self-contained file each.
+
+The :class:`ShoppingSession` ties them together into a streaming turn. See the
+package README for the full map.
+"""
+
+from __future__ import annotations
+
+import os
+
+from dotenv import load_dotenv
+
+# Load the repo-root .env (OPENAI_API_KEY + model overrides) before anything resolves
+# a model name. Importing any submodule triggers this package first, so it always wins.
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+load_dotenv(os.path.join(_ROOT, ".env"))
+
+from google_adk_agent_v1.session import ShoppingSession  # noqa: E402
+
+__all__ = ["ShoppingSession"]
