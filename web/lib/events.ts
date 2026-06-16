@@ -10,6 +10,13 @@ function ts() {
   return d.toTimeString().slice(0, 8); // HH:MM:SS
 }
 
+/** Format a stored ISO timestamp as HH:MM:SS (used when replaying a saved session
+ * so the event log shows the ORIGINAL times, not the replay time). */
+export function formatStoredTs(iso: string): string {
+  const d = new Date(iso);
+  return isNaN(d.getTime()) ? '' : d.toTimeString().slice(0, 8);
+}
+
 /**
  * Project a raw SSE event into 0..1 ``LogEntry`` rows for the
  * event-stream panel. ``state`` and ``end`` are control events that

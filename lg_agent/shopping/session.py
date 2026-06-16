@@ -32,6 +32,7 @@ from langchain_core.messages import (
 )
 
 from lg_agent.core import trace
+from lg_agent.core.event_store import now_iso
 from lg_agent.core.guardrails import CompiledInputRule, run_input_guardrails
 from lg_agent.shopping import setup
 from lg_agent.shopping.agents.orchestrator import CONFIG as ORCHESTRATOR_CONFIG
@@ -89,6 +90,9 @@ class ShoppingSession:
     writer_buffered: bool = False
     # Emit deep-trace events (exact payloads between orchestrator/sub-agents/writer).
     debug: bool = True
+    # Optional persistence: a sink (e.g. SQLiteEventStore) that records every event
+    # + state snapshot of each turn. None → nothing is written.
+    events_store: Any = None
 
     def __post_init__(self) -> None:
         if self.orchestrator is None:
@@ -108,6 +112,30 @@ class ShoppingSession:
 
     # ----- the streaming turn -----
     async def run_turn_stream(self, user_text: str) -> AsyncGenerator[dict, None]:
+        """Stream the turn's events, teeing each into ``events_store`` if configured.
+
+        This wraps :meth:`_produce_turn` (which holds the actual pipeline) so the
+        persistence concern lives in ONE place instead of being sprinkled across
+        every ``yield``. Events are timestamped as they're yielded and flushed once
+        per turn (off the event loop, in a thread) — durable at turn end, never
+        blocking the stream, and never able to break a turn if the DB errors.
+        """
+        rows: list[tuple[str, dict]] = []
+        try:
+            async for ev in self._produce_turn(user_text):
+                if self.events_store is not None:
+                    rows.append((now_iso(), ev))
+                yield ev
+        finally:
+            if self.events_store is not None and rows:
+                try:
+                    await asyncio.to_thread(
+                        self.events_store.record_turn, self.session_id, self.user_id, self.turn, rows
+                    )
+                except Exception:  # noqa: BLE001  persistence must never break a turn
+                    pass
+
+    async def _produce_turn(self, user_text: str) -> AsyncGenerator[dict, None]:
         self.turn += 1
         yield {"type": "user", "content": user_text, "turn": self.turn}
         yield {"type": "state", "snapshot": self.snapshot()}

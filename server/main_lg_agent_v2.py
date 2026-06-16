@@ -1,22 +1,25 @@
-"""FastAPI bridge for ``lg_agent`` — speaks the same SSE/JSON contract as the v4_1
-server, so the existing web UI works unchanged.
+"""FastAPI bridge for ``lg_agent_v2`` — speaks the same SSE/JSON contract as the other
+engines, so the existing web UI works unchanged.
 
 Endpoints:
-  * ``POST /api/session``           — create a session, returns ``{session_id}``;
-  * ``GET  /api/state/{id}``        — the current ``AgentSnapshot`` (cart + messages);
-  * ``POST /api/turn/{id}``         — run one turn; stream events (incl. live writer
-                                      tokens) as Server-Sent Events.
+  * ``POST /api/session``      — create a session, returns ``{session_id}``;
+  * ``GET  /api/state/{id}``   — the current ``AgentSnapshot`` (cart + messages);
+  * ``POST /api/turn/{id}``    — run one turn; stream events (incl. live writer
+                                 tokens) as Server-Sent Events.
 
-Run (the frontend defaults to http://localhost:8001):
-    uvicorn server.main_lg:app --reload --port 8001
+Run:
+    uvicorn server.main_lg_agent_v2:app --reload --port 8006
+
+Point the web UI at it with ``AGENT_V2_API_URL=http://localhost:8006`` (or run it on
+whatever port your frontend already targets).
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
-import uuid
 import os
+import uuid
 from typing import Any, AsyncGenerator
 
 from fastapi import FastAPI, HTTPException
@@ -24,14 +27,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from lg_agent.core.event_store import SQLiteEventStore
-from lg_agent.shopping import ShoppingSession
+from lg_agent.core.event_store import SQLiteEventStore, now_iso
+from lg_agent_v2 import ShoppingSession
 
-app = FastAPI(title="lg_agent (streaming) debug API", version="0.1.0")
+app = FastAPI(title="lg_agent_v2 (streaming) debug API", version="0.1.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-# One SQLite sink for the whole server — every turn's events + state snapshots
-# (main agent AND sub-agents) are teed here. Override the path with LG_AGENT_EVENTS_DB.
+# Tee every turn's events + snapshots to SQLite (override path with LG_AGENT_EVENTS_DB).
 EVENTS = SQLiteEventStore(os.environ.get("LG_AGENT_EVENTS_DB", "lg_agent_events.db"))
 
 SESSIONS: dict[str, ShoppingSession] = {}
@@ -49,7 +51,7 @@ class TurnRequest(BaseModel):
 def _get_or_create(session_id: str) -> ShoppingSession:
     session = SESSIONS.get(session_id)
     if session is None:
-        session = ShoppingSession(user_id="demo", session_id=session_id, events_store=EVENTS)
+        session = ShoppingSession(user_id="demo", session_id=session_id)
         SESSIONS[session_id] = session
         _LOCKS[session_id] = asyncio.Lock()
     return session
@@ -61,13 +63,13 @@ def _sse(data: dict) -> str:
 
 @app.get("/api/health")
 def health() -> dict[str, str]:
-    return {"status": "ok", "engine": "lg_agent"}
+    return {"status": "ok", "engine": "lg_agent_v2"}
 
 
 @app.post("/api/session", response_model=NewSessionResponse)
 def new_session() -> NewSessionResponse:
     sid = f"sess-{uuid.uuid4().hex[:8]}"
-    SESSIONS[sid] = ShoppingSession(user_id="demo", session_id=sid, events_store=EVENTS)
+    SESSIONS[sid] = ShoppingSession(user_id="demo", session_id=sid)
     _LOCKS[sid] = asyncio.Lock()
     return NewSessionResponse(session_id=sid)
 
@@ -82,11 +84,7 @@ def get_state(session_id: str) -> dict[str, Any]:
 
 @app.get("/api/sessions")
 def list_sessions() -> dict[str, Any]:
-    """All stored sessions (for the 'load previous session' picker).
-
-    ``live`` = still in memory on this server (resumable); otherwise it's an
-    archived session that can be replayed read-only.
-    """
+    """All stored sessions (for the 'load previous session' picker); ``live`` = in memory."""
     rows = EVENTS.list_sessions()
     for r in rows:
         r["live"] = r["session_id"] in SESSIONS
@@ -95,34 +93,38 @@ def list_sessions() -> dict[str, Any]:
 
 @app.get("/api/events/{session_id}")
 def get_events(session_id: str) -> dict[str, Any]:
-    """The persisted event log for a session (everything teed to SQLite), in order.
-
-    Replayed by the web client to reconstruct a past session exactly as it looked
-    live — the ``data`` of each row is the original event.
-    """
+    """Every persisted event in order (``data`` = the original event) — replayed by the UI."""
     return {"session_id": session_id, "events": EVENTS.read_events(session_id)}
 
 
 @app.get("/api/snapshots/{session_id}")
 def get_snapshots(session_id: str) -> dict[str, Any]:
-    """The persisted state snapshots for a session (one row per `state` event)."""
     return {"session_id": session_id, "snapshots": EVENTS.read_snapshots(session_id)}
 
 
 @app.post("/api/turn/{session_id}")
 async def turn(session_id: str, req: TurnRequest) -> StreamingResponse:
-    """Run one turn; stream events (incl. live writer tokens) as SSE."""
+    """Run one turn; stream events (incl. live writer tokens) as SSE, teeing to SQLite."""
     session = _get_or_create(session_id)
     lock = _LOCKS.setdefault(session_id, asyncio.Lock())
 
     async def event_stream() -> AsyncGenerator[str, None]:
         async with lock:  # one turn at a time per session
+            rows: list[tuple[str, dict]] = []
             try:
                 async for ev in session.run_turn_stream(req.message):
+                    rows.append((now_iso(), ev))
                     yield _sse(ev)
-            except Exception as e:  # noqa: BLE001  (run_turn_stream handles its own; belt-and-braces)
-                yield _sse({"type": "error", "content": str(e)})
-                yield _sse({"type": "end"})
+            except Exception as e:  # noqa: BLE001  (belt-and-braces; the session handles its own)
+                for extra in ({"type": "error", "content": str(e)}, {"type": "end"}):
+                    rows.append((now_iso(), extra))
+                    yield _sse(extra)
+            try:  # persist after the stream; never let logging break the turn
+                await asyncio.to_thread(
+                    EVENTS.record_turn, session_id, session.user_id, session.turn, rows
+                )
+            except Exception:  # noqa: BLE001
+                pass
 
     return StreamingResponse(
         event_stream(),

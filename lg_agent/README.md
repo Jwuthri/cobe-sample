@@ -171,3 +171,27 @@ by editing that agent's `model` block, or globally via the `LG_AGENT_MODEL` /
 The `AgentSnapshot` shape and the event vocabulary are identical to `agent_v4_1`,
 so the unchanged frontend renders it the same — including live token streaming
 (`{type:"token"}`) and the deep-trace debug panel (`{type:"trace"}`).
+
+---
+
+## Persistence & session replay
+
+Every turn's events **and** state snapshots are teed to SQLite
+([core/event_store.py](core/event_store.py)) — main agent *and* sub-agents, because
+the orchestrator's stream already carries the sub-agents' traffic (tool calls, step
+results, deep-trace frames), so teeing that one stream captures everything. The sink
+is decoupled: the session takes an optional `events_store` and flushes one batched
+transaction per turn off the event loop; no store wired → nothing is written.
+
+Extra endpoints for the "load previous session" UI:
+
+* `GET /api/sessions` → all stored sessions (id, turns, `live` = still in memory)
+* `GET /api/events/{id}` → every persisted event in order (`data` = the original event)
+* `GET /api/snapshots/{id}` → the state snapshot per `state` event
+
+**Replay is faithful by construction:** the web client re-feeds the stored events
+through the *same* `logEntriesFor` projection the live stream uses, so a loaded
+session renders identically — same event log, same cart, same transcript, every
+sub-agent row included. A session still in memory is resumable; an archived one
+(after a server restart) loads read-only. DB path: `lg_agent_events.db` in the CWD,
+override with `LG_AGENT_EVENTS_DB`.

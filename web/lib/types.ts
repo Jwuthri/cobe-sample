@@ -140,6 +140,28 @@ export type ServerEvent =
   | { type: 'end' }
   | { type: 'error'; content: string };
 
+// ---- Persisted-session replay (tee-to-DB) ----
+// One stored session, surfaced in the "load previous session" picker.
+export interface SessionInfo {
+  session_id: string;
+  user_id: string | null;
+  created_at: string | null;
+  last_seen: string | null;
+  events: number;
+  turns: number;
+  live: boolean; // still in memory on the server (resumable) vs archived (replay-only)
+}
+
+// One persisted event row; `data` is the original ServerEvent, replayed verbatim.
+export interface StoredEvent {
+  session_id: string;
+  turn: number;
+  seq: number;
+  type: string;
+  ts: string;
+  data: ServerEvent;
+}
+
 // Log entries we surface in the event-stream panel (richer than raw events
 // because we add timestamps + presentation metadata).
 export interface LogEntry {

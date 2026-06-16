@@ -7,9 +7,9 @@ import { ChatInput } from '@/components/ChatInput';
 import { ChatPanel } from '@/components/ChatPanel';
 import { EventStream } from '@/components/EventStream';
 import { Header } from '@/components/Header';
-import { createSession, getState, streamTurn } from '@/lib/api';
-import { logEntriesFor } from '@/lib/events';
-import type { AgentSnapshot, LogEntry } from '@/lib/types';
+import { createSession, fetchEvents, getState, listSessions, streamTurn } from '@/lib/api';
+import { formatStoredTs, logEntriesFor } from '@/lib/events';
+import type { AgentSnapshot, LogEntry, SessionInfo } from '@/lib/types';
 
 export default function Page() {
   const [sessionId, setSessionId] = useState<string | null>(null);
@@ -19,13 +19,25 @@ export default function Page() {
   const [pendingBot, setPendingBot] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [tab, setTab] = useState<'chat' | 'events'>('events');
+  const [sessions, setSessions] = useState<SessionInfo[]>([]);
+  // True while viewing an archived (not-in-memory) session — replay-only, no chatting.
+  const [readOnly, setReadOnly] = useState(false);
 
-  // ----- session bootstrap -----
+  const refreshSessions = useCallback(async () => {
+    try {
+      setSessions(await listSessions());
+    } catch (e) {
+      console.error(e);
+    }
+  }, []);
+
+  // ----- session bootstrap (new, live session) -----
   const startSession = useCallback(async () => {
     setEvents([]);
     setSnapshot(null);
     setPendingUser(null);
     setPendingBot(null);
+    setReadOnly(false);
     try {
       const sid = await createSession();
       setSessionId(sid);
@@ -34,16 +46,51 @@ export default function Page() {
     } catch (e) {
       console.error(e);
     }
-  }, []);
+    void refreshSessions();
+  }, [refreshSessions]);
 
   useEffect(() => {
     void startSession();
   }, [startSession]);
 
+  // ----- load a previous session: replay its stored events EXACTLY as they ran -----
+  const loadSession = useCallback(
+    async (sid: string, live: boolean) => {
+      if (busy) return;
+      setBusy(true);
+      setPendingUser(null);
+      setPendingBot(null);
+      try {
+        const stored = await fetchEvents(sid);
+        // Replay through the SAME projection the live stream uses, so the rebuilt
+        // view is identical — every main-agent AND sub-agent row reappears.
+        const logs: LogEntry[] = [];
+        let snap: AgentSnapshot | null = null;
+        for (const row of stored) {
+          const ev = row.data;
+          for (const entry of logEntriesFor(ev)) {
+            entry.ts = formatStoredTs(row.ts) || entry.ts; // show the ORIGINAL time
+            logs.push(entry);
+          }
+          if (ev.type === 'state') snap = ev.snapshot;
+        }
+        setEvents(logs);
+        setSnapshot(snap);
+        setSessionId(sid);
+        setReadOnly(!live); // archived → read-only; still-live → can keep chatting
+      } catch (e) {
+        console.error(e);
+      } finally {
+        setBusy(false);
+      }
+    },
+    [busy],
+  );
+
   // ----- send a turn -----
   const send = useCallback(
     async (msg: string) => {
-      if (!sessionId || busy) return;
+      if (!sessionId || busy || readOnly) return;
       setBusy(true);
       setPendingUser(msg);
       setPendingBot(null);
@@ -81,14 +128,23 @@ export default function Page() {
             setSnapshot(s);
           } catch {}
         }
+        void refreshSessions(); // the turn is now persisted — update the picker
       }
     },
-    [sessionId, busy],
+    [sessionId, busy, readOnly, refreshSessions],
   );
 
   return (
     <div className="flex h-screen flex-col">
-      <Header sessionId={sessionId} onNewSession={startSession} busy={busy} />
+      <Header
+        sessionId={sessionId}
+        sessions={sessions}
+        readOnly={readOnly}
+        onNewSession={startSession}
+        onLoadSession={loadSession}
+        onOpenSessions={refreshSessions}
+        busy={busy}
+      />
 
       <main className="grid flex-1 min-h-0 grid-cols-[minmax(360px,440px)_1fr]">
         {/* Left: cart panel */}
@@ -114,15 +170,25 @@ export default function Page() {
             {tab === 'events' ? (
               <EventStream entries={events} />
             ) : (
-              <ChatPanel
-                snapshot={snapshot}
-                pendingUser={pendingUser}
-                pendingBot={pendingBot}
-              />
+              <ChatPanel snapshot={snapshot} pendingUser={pendingUser} pendingBot={pendingBot} />
             )}
           </div>
 
-          <ChatInput onSend={send} disabled={!sessionId || busy} />
+          {readOnly ? (
+            <div className="flex items-center justify-between gap-2 border-t border-amber-700/40 bg-amber-950/30 px-4 py-2.5 text-xs text-amber-300/90">
+              <span>
+                📖 Viewing a saved session (read-only). Start a new session to chat.
+              </span>
+              <button
+                onClick={startSession}
+                className="shrink-0 rounded-md border border-amber-700/50 bg-amber-900/30 px-3 py-1 font-medium text-amber-200 hover:bg-amber-900/50"
+              >
+                New session
+              </button>
+            </div>
+          ) : (
+            <ChatInput onSend={send} disabled={!sessionId || busy} />
+          )}
         </section>
       </main>
     </div>

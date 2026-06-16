@@ -60,5 +60,10 @@ Thumbs.db
 history.txt
 *.log
 
+# SQLite event store (lg_agent tee-to-db)
+*.db
+*.db-wal
+*.db-shm
+
 # Jupyter
 .ipynb_checkpoints/

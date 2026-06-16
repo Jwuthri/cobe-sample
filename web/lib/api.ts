@@ -1,4 +1,4 @@
-import type { AgentSnapshot, ServerEvent } from './types';
+import type { AgentSnapshot, ServerEvent, SessionInfo, StoredEvent } from './types';
 
 const API = ''; // same origin — Next.js rewrites /api/* → FastAPI
 
@@ -13,6 +13,22 @@ export async function getState(sessionId: string): Promise<AgentSnapshot> {
   const res = await fetch(`${API}/api/state/${sessionId}`);
   if (!res.ok) throw new Error(`get state failed: ${res.status}`);
   return (await res.json()) as AgentSnapshot;
+}
+
+/** List all persisted sessions, newest first (for the load-session picker). */
+export async function listSessions(): Promise<SessionInfo[]> {
+  const res = await fetch(`${API}/api/sessions`);
+  if (!res.ok) throw new Error(`list sessions failed: ${res.status}`);
+  const json = (await res.json()) as { sessions: SessionInfo[] };
+  return json.sessions;
+}
+
+/** Fetch every persisted event for a session, in stream order, for replay. */
+export async function fetchEvents(sessionId: string): Promise<StoredEvent[]> {
+  const res = await fetch(`${API}/api/events/${sessionId}`);
+  if (!res.ok) throw new Error(`fetch events failed: ${res.status}`);
+  const json = (await res.json()) as { events: StoredEvent[] };
+  return json.events;
 }
 
 /**
